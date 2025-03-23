@@ -22,7 +22,7 @@ ollama pull codellama
 ## Использование
 ```bash
 # Запустите анализатор
-python main.py /path/to/your/android/project
+python src/main.py src/test/resources --output docs/analysis.md --cache-dir .cache --verbose  --clear-logs
 ```
 
 ## Структура проекта

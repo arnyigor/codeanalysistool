@@ -10,14 +10,11 @@ def main():
     processor = ASTProcessor()
     
     # Анализируем файл
-    kotlin_file = 'src/test/resources/KotlinAnalyzer.kt'
+    kotlin_file = 'test/resources/KotlinAnalyzer.kt'
     info = processor.process_kotlin_file(kotlin_file)
     processor.class_info = info
     
     # Генерируем отчет
-    report_file = 'ast_report.md'
+    report_file = '../ast_report.md'
     processor.generate_ast_report(report_file)
     print(f'Отчет сохранен в {report_file}')
-
-if __name__ == '__main__':
-    main() 
