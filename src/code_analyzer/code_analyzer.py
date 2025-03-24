@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .llm_client import OllamaClient
+from src.llm.llm_client import OllamaClient
 from .doc_analyzer import DocAnalyzer
 
 class CodeAnalyzer:

@@ -10,6 +10,18 @@
 - Ollama (https://ollama.ai/)
 - Локальная модель LLM (например, `codellama:7b`)
 
+## Активация окружения
+```bash
+source myenv/bin/activate
+```
+
+## Тесты
+```bash
+pytest src/test/ -v --log-cli-level=DEBUG
+```
+Флаг `-v` — подробный вывод.
+Флаг `--log-cli-level=DEBUG` — отображение логов из тестов.
+
 ## Установка
 ```bash
 # Установите зависимости
@@ -22,7 +34,12 @@ ollama pull codellama
 ## Использование
 ```bash
 # Запустите анализатор
-python src/main.py src/test/resources --output docs/analysis.md --cache-dir .cache --verbose  --clear-logs
+python src/main.py src/test/resources --output docs/analysis.md --cache-dir .cache --clear-logs
+```
+```bash
+# Запустите Тесты
+python src/main.py src/test/resources --verbose --clear-logs --test
+
 ```
 
 ## Структура проекта
