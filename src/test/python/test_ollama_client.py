@@ -101,15 +101,17 @@ def test_real_analyze_code_kotlin(ollama_client):
     """
     result = ollama_client.analyze_code(code, "kotlin")
 
-    # 1. Проверка наличия ключа 'documentation'
+    # Проверка наличия ключа 'documentation'
     assert "documentation" in result, "Отсутствует ключ 'documentation' в ответе"
 
-    # 2. Проверка корректности документации
+    # Проверка корректности документации для Kotlin (KDoc)
     assert "DataProcessor" in result["documentation"], "Документация не содержит класс DataProcessor"
     assert "filterData" in result["documentation"], "Документация не содержит описание метода filterData"
-    assert "KDoc" in result["documentation"], "Формат документации не соответствует KDoc"
+    assert "/**" in result["documentation"], "Отсутствуют блоки KDoc"
+    assert "@param data" in result["documentation"], "Отсутствует описание параметра @param"
+    assert "@return" in result["documentation"], "Отсутствует описание возвращаемого значения @return"
 
-    # 3. Проверка метрик
+    # Проверка метрик
     assert "metrics" in result, "Отсутствуют метрики в ответе"
     assert result["metrics"]["time"] > 0, "Время выполнения не указано"
 #
