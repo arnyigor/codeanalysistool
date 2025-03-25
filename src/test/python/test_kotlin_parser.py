@@ -80,4 +80,3 @@ def test_parse_class_with_inheritance(parser):
     # Проверяем наследование
     class_info = result["classes"][0]
     assert class_info["name"] == "InheritedClass"
-    # TODO: Добавить проверку суперкласса и интерфейсов после реализации их извлечения 
