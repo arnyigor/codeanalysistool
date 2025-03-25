@@ -1,5 +1,5 @@
 import pytest
-from ast.kotlin_parser import KotlinASTParser
+from src.ast.kotlin_parser import KotlinASTParser
 
 @pytest.fixture
 def parser():
