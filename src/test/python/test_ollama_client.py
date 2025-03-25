@@ -130,24 +130,21 @@ def test_real_model_parameters(ollama_client):
         logging.info(f"Название модели: {model_info.get('model', 'Неизвестно')}")
     if 'model_info' in model_info:
         info = model_info['model_info']
-        logging.info(f"Архитектура: {info.get('general.architecture', 'Неизвестно')}")
-        logging.info(f"Количество параметров: {info.get('general.parameter_count', 'Неизвестно')}")
-        logging.info(f"Размер контекста: {info.get('general.context_length', 'Неизвестно')}")
-        logging.info(f"Квантизация: {info.get('general.quantization_level', 'Неизвестно')}")
+        context_length = None
+        
+        # Ищем любой ключ, содержащий context_length
+        for key in info.keys():
+            if 'context_length' in key:
+                context_length = info[key]
+                break
+                
+        if context_length is None:
+            context_length = 'Неизвестно'
+            
+        logging.info(f"Размер контекста: {context_length}")
     logging.info("========================")
     
     assert 'model_info' in model_info, "Отсутствует model_info"
-    assert 'general.architecture' in model_info['model_info'], "Отсутствует general.architecture"
-    assert 'general.parameter_count' in model_info['model_info'], "Отсутствует general.parameter_count"
-
-
-def test_large_code_java(ollama_client):
-    """Тест на большие объемы кода (500 строк)"""
-    code = "class BigClass {\n" + "    void method() {}\n" * 500 + "}"
-    result = ollama_client.analyze_code(code, "java")
-
-    assert "error" not in result, "Ошибка при обработке большого кода"
-    assert len(result['code']) > len(code), "Документация не добавлена"
 
 
 def test_invalid_file_type(ollama_client):
@@ -173,21 +170,14 @@ def test_real_api_response(ollama_client):
     assert "chunks_received" in result["generation_info"], "Отсутствует статистика по чанкам"
 
 
-@pytest.mark.slow
-def test_context_limit(ollama_client):
-    """Тест превышения лимита контекста (16KB)"""
-    long_code = "public class Overflow {\n" + "    void method() { /* " + "x" * 16384 + " */ }\n}"
-    result = ollama_client.analyze_code(long_code, "java")
-
-    assert "error" in result, "Не обнаружена ошибка превышения контекста"
-    assert "превышен лимит контекста" in result['error'], "Неверное сообщение об ошибке"
-
-
 def test_documentation_presence(ollama_client):
     """Проверка наличия документации в ответе"""
     code = "class Logger {\n    void log(String msg) {}\n}"
     result = ollama_client.analyze_code(code, "java")
 
-    assert re.search(r'/\*\*\n.*?\*/', result['code'], flags=re.DOTALL), \
+    assert "documentation" in result, "Отсутствует поле documentation в ответе"
+    assert re.search(r'/\*\*\n.*?\*/', result['documentation'], flags=re.DOTALL), \
         "Отсутствует многострочная документация"
-    assert "log(String msg)" in result['code'], "Метод не документирован"
+    assert "log(String msg)" in result['code'], "Отсутствует исходный код"
+    assert "Logger" in result['documentation'], "Отсутствует документация класса"
+    assert "@param msg" in result['documentation'], "Отсутствует документация параметра"

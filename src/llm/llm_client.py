@@ -1,6 +1,9 @@
 import json
 import logging
+import os
 import time
+import re
+import hashlib
 from typing import Dict, Optional
 
 import ollama
@@ -12,6 +15,13 @@ class OllamaClient:
         Инициализация клиента Ollama.
         Использует первую доступную запущенную модель.
         """
+        # Настраиваем логирование
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        
         try:
             models = ollama.list()
             available_models = models.get('models', [])
@@ -28,35 +38,29 @@ class OllamaClient:
             # Получаем детальную информацию о модели
             model_details = ollama.show(self.model)
             
-            # Логируем структуру для отладки
-            # logging.debug("Структура model_details:")
-            # logging.debug(json.dumps(model_details, indent=2, ensure_ascii=False))
-
             # Форматируем размер модели
             size_bytes = int(model_info.get('size', 0))
             size_gb = size_bytes / (1024 * 1024 * 1024)
 
-            # Получаем параметры модели из структуры model_info
+            # Получаем размер контекста
             model_params = model_details.get('model_info', {})
+            self.context_length = None
             
-            # Получаем параметры
-            param_count = model_params.get('general.parameter_count', 0)
-            param_count_b = round(param_count / 1_000_000_000, 2) if param_count else 'Неизвестно'
-            
-            context_length = model_params.get('qwen2.context_length', 
-                           model_params.get('general.context_length', 'Неизвестно'))
-            
-            architecture = model_params.get('general.architecture', 'Неизвестно')
-            quantization = model_params.get('general.quantization_level', 'Неизвестно')
+            # Ищем любой ключ, содержащий context_length
+            for key in model_params.keys():
+                if 'context_length' in key:
+                    self.context_length = model_params[key]
+                    break
+                    
+            if self.context_length is None:
+                self.context_length = 8192  # Безопасное значение по умолчанию
+                logging.warning("Не удалось определить размер контекста модели, используем значение по умолчанию")
 
-            # Логируем информацию о модели
+            # Логируем основную информацию о модели
             logging.info("Используется модель Ollama:")
             logging.info(f"- Название: {self.model}")
             logging.info(f"- Размер модели: {size_gb:.2f} GB")
-            logging.info(f"- Количество параметров: {param_count_b}B")
-            logging.info(f"- Размер контекста: {context_length} токенов")
-            logging.info(f"- Архитектура: {architecture}")
-            logging.info(f"- Квантизация: {quantization}")
+            logging.info(f"- Размер контекста: {self.context_length} токенов")
 
             # Сохраняем структуру
             self.model_details = model_details
@@ -71,207 +75,138 @@ class OllamaClient:
                 "2. Хотя бы одна модель активна"
             )
 
+    def _estimate_doc_size(self, code: str, file_type: str) -> int:
+        """Оценивает размер необходимой документации."""
+        lines_count = len(code.splitlines())
+        
+        # В среднем на каждые 3 строки кода - 1 строка документации
+        # Каждая строка документации ~ 20 токенов
+        estimated_tokens = (lines_count // 3) * 20
+        
+        # Минимум 200 токенов, максимум 3000
+        return max(200, min(estimated_tokens, 3000))
+
+    def _get_model_params(self, code: str, template_size: int, file_type: str) -> dict:
+        """Формирует параметры запроса к модели."""
+        # Фиксированный размер контекста для файлов до 1000 строк
+        OPTIMAL_CONTEXT = 4096
+        
+        # Оцениваем размеры в токенах
+        input_tokens = (len(code.encode()) + template_size) // 3
+        
+        # Оцениваем размер документации
+        doc_tokens = self._estimate_doc_size(code, file_type)
+        
+        # Устанавливаем параметры
+        options = {
+            "temperature": 0.3,  # Более консервативное значение для документации
+            "top_p": 0.7,
+            "num_predict": doc_tokens + 500,  # Базовый размер + буфер
+            "num_ctx": OPTIMAL_CONTEXT
+        }
+        
+        # Логируем параметры
+        logging.info("\nПараметры запроса к модели:")
+        logging.info(f"- Размер контекста: {OPTIMAL_CONTEXT} токенов")
+        logging.info(f"- Входной контекст: {input_tokens} токенов")
+        logging.info(f"- Оценка документации: {doc_tokens} токенов")
+        logging.info(f"- Тип файла: {file_type}")
+        logging.info(f"- Температура: {options['temperature']}")
+        logging.info(f"- Top-p: {options['top_p']}")
+        logging.info(f"- Предсказание токенов: {options['num_predict']}")
+        
+        return {"options": options}
+
     def analyze_code(self, code: str, file_type: str) -> Optional[dict]:
-        """
-        Анализирует код и генерирует документацию.
-
-        Args:
-            code (str): Исходный код
-            file_type (str): Тип файла ('kotlin', 'java', 'python')
-
-        Returns:
-            Dict: Результат анализа (документация или ошибка)
-
-        Raises:
-            ValueError: Если тип файла не поддерживается
-        """
-        logging.info(f"Начинаем анализ файла типа {file_type}")
-        logging.info(f"Размер кода: {len(code.encode())} байт")
+        """Анализирует код и генерирует документацию."""
+        # Проверяем тип файла
+        if file_type not in ['java', 'kotlin']:
+            raise ValueError(f"Неподдерживаемый тип файла: {file_type}")
+        
+        # Проверяем наличие кода
+        if not code or not code.strip():
+            return self._create_error_response("пустой код")
+        
+        logging.info(f"\n{'='*50}\nНачало анализа кода\n{'='*50}")
+        logging.info(f"Тип файла: {file_type}")
+        
+        code_size = len(code.encode())
+        logging.info(f"Размер кода: {code_size} байт")
 
         try:
-            # Проверка на пустой код
-            if not code.strip():
-                return self._create_error_response("пустой код")
-
-            # Создаем промпт
+            # Создаем промпт с кодом
             prompt = self._create_documentation_prompt(code, file_type)
-            prompt_size = len(prompt.encode())
-            logging.info(f"Создан промпт размером {prompt_size} байт")
-
-            # Проверка размера контекста
-            max_context_size = 16384  # Лимит 16KB как в тесте
-            if prompt_size > max_context_size:
-                logging.error(f"Превышен максимальный размер контекста: {prompt_size} байт > {max_context_size} байт")
-                return {
-                    "error": "превышен лимит контекста",
-                    "code": code
-                }
-
-            # Параметры генерации
-            model_params = {
-                "temperature": 0.1,
-                "top_p": 0.1,
-                "num_predict": 2048,
-                "stop": ["[КОНЕЦ ОТВЕТА]"],
-                "repeat_penalty": 1.1,
-                "num_ctx": 8192,
-                "system": "Вы - опытный разработчик, создающий документацию на русском языке."
-            }
-
-            # Логирование параметров
-            logging.info(f"Параметры запроса к модели: {json.dumps(model_params, indent=2, ensure_ascii=False)}")
-
-            # Генерация ответа
+            
+            # Получаем адаптивные параметры запроса
+            model_params = self._get_model_params(code, len(prompt.encode()), file_type)
+            
+            # Добавляем системный промпт к параметрам
+            if "[КОД]" in prompt:
+                system_prompt = prompt.split("[КОД]")[0].strip()
+                model_params['system'] = system_prompt
+            
+            logging.info("\nОтправляем запрос к модели...")
             start_time = time.time()
             
-            logging.info("Отправляем запрос к модели...")
+            # Отправляем запрос к модели с полным промптом
+            response = ollama.generate(
+                model=self.model,
+                prompt=prompt,  # Отправляем полный промпт с кодом
+                **model_params
+            )
             
-            try:
-                # Получаем ответ от модели
-                response = ollama.generate(
-                    model=self.model,
-                    prompt=prompt,
-                    stream=True,
-                    options=model_params
-                )
-
-                full_response = []
-                chunks_received = 0
-                total_tokens = 0
-                generation_info = {}
-                
-                # Универсальная обработка ответа
-                for chunk in response:
-                    chunks_received += 1
-                    
-                    # Подробное логирование первого чанка
-                    if chunks_received == 1:
-                        logging.info(f"Первый чанк: {chunk}")
-                        if isinstance(chunk, dict):
-                            logging.info(f"Ключи в первом чанке: {chunk.keys()}")
-                            # Сохраняем информацию о генерации
-                            generation_info = {
-                                'model': chunk.get('model', ''),
-                                'created_at': chunk.get('created_at', ''),
-                                'chunks_received': chunks_received
-                            }
-                    
-                    chunk_text = None
-                    
-                    # Пробуем разные варианты получения текста
-                    if isinstance(chunk, dict):
-                        # Проверяем все возможные ключи
-                        for key in ['response', 'content', 'text', 'output', 'generated_text']:
-                            if key in chunk:
-                                chunk_text = chunk[key]
-                                break
-                        # Проверяем на ошибки
-                        if 'error' in chunk:
-                            error_msg = f"Ошибка от модели: {chunk['error']}"
-                            logging.error(error_msg)
-                            return self._create_error_response(error_msg)
-                    elif hasattr(chunk, 'response'):
-                        chunk_text = chunk.response
-                    elif hasattr(chunk, 'text'):
-                        chunk_text = chunk.text
-                    elif isinstance(chunk, str):
-                        chunk_text = chunk
-                        
-                    if chunk_text:
-                        full_response.append(chunk_text)
-
-                # Объединяем ответ
-                full_response_str = ''.join(full_response).strip()
-                elapsed_time = time.time() - start_time
-
-                # Подробное логирование при пустом ответе
-                if not full_response_str:
-                    logging.error("Пустой ответ от модели")
-                    logging.error("Отправленный промпт:")
-                    logging.error(prompt[:500] + "...")
-                    logging.error("Получено чанков: {}".format(chunks_received))
-                    # Проверяем последний чанк
-                    if chunks_received > 0:
-                        logging.error("Последний полученный чанк:")
-                        logging.error(str(chunk))
-                        if 'done_reason' in chunk:
-                            logging.error(f"Причина завершения: {chunk['done_reason']}")
-                    return self._create_error_response("Пустой ответ от модели")
-
-                # Логируем полный ответ для отладки
-                # logging.debug("Полный ответ от модели:")
-                # logging.debug(full_response_str)
-
-                # Очищаем ответ от возможных маркеров
-                clean_response = full_response_str
-                if "[КОНЕЦ КОДА]" in clean_response:
-                    clean_response = clean_response.split("[КОНЕЦ КОДА]")[0]
-                if "[КОД ДЛЯ ДОКУМЕНТИРОВАНИЯ]" in clean_response:
-                    clean_response = clean_response.split("[КОД ДЛЯ ДОКУМЕНТИРОВАНИЯ]")[1]
-                
-                clean_response = clean_response.strip()
-
-                # Проверяем наличие документации
-                if "/**" not in clean_response:
-                    logging.error("Ответ не содержит документацию")
-                    logging.error("Полученный ответ:")
-                    logging.error(clean_response[:500] + "...")
-                    return self._create_error_response("Ответ не содержит документацию")
-
-                # Подсчитываем токены если не получили из модели
-                if total_tokens == 0:
-                    total_tokens = len(full_response_str.split())
-
-                tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
-
-                # Логирование метрик
-                metrics_str = (
-                    "\nГотово:"
-                    f"\n- Время выполнения: {elapsed_time:.1f} секунд"
-                    f"\n- Объем контекста: {model_params['num_ctx']} токенов"
-                    f"\n- Обработано токенов: {total_tokens}"
-                    f"\n- Скорость генерации: {tokens_per_second:.1f} ток/с"
-                    f"\n- Чанков получено: {chunks_received}"
-                    f"\n- Размер ответа: {len(clean_response.encode('utf-8'))} байт"
-                )
-                logging.info(metrics_str)
-                
-                if clean_response:
-                    preview = clean_response[:100] + "..." if len(clean_response) > 100 else clean_response
-                    logging.info(f"Начало ответа:\n{preview}")
-
-                # Обновляем информацию о генерации
-                generation_info['chunks_received'] = chunks_received
-                generation_info['total_tokens'] = total_tokens
-                generation_info['elapsed_time'] = elapsed_time
-
-                # Удаляем маркеры кода из ответа
-                if clean_response.startswith("```"):
-                    clean_response = clean_response[clean_response.find("\n")+1:]
-                if clean_response.endswith("```"):
-                    clean_response = clean_response[:-3]
-
-                return {
-                    "documentation": clean_response,
-                    "code": code + "\n" + clean_response,  # Добавляем оригинальный код
-                    "status": "success",
-                    "metrics": {
-                        "time": elapsed_time,
-                        "tokens": total_tokens,
-                        "speed": tokens_per_second,
-                        "chunks": chunks_received
-                    },
-                    "generation_info": generation_info
+            # Получаем метрики
+            elapsed_time = time.time() - start_time
+            total_tokens = response.get('total_tokens', 0)
+            tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
+            
+            # Очищаем ответ
+            clean_response = response.get('response', '').strip()
+            logging.info(f"\nОтвет модели:\n{clean_response}")
+            
+            # Извлекаем документацию из ответа и очищаем от маркеров языка
+            documentation = clean_response
+            if "```" in clean_response:
+                code_parts = clean_response.split("```")
+                for part in code_parts:
+                    if part.strip() and "/**" in part:
+                        # Убираем маркер языка, если он есть
+                        lines = part.strip().split('\n')
+                        if lines[0].lower() in ['java', 'kotlin']:
+                            documentation = '\n'.join(lines[1:])
+                        else:
+                            documentation = part.strip()
+                        break
+            
+            # Если нет документации, создаем базовую
+            if not "/**" in documentation:
+                documentation = self._create_empty_java_doc(code)
+                logging.warning("Модель вернула некорректный ответ, создана базовая документация")
+            
+            # Сохраняем результат для тестов
+            self._save_test_result(code, documentation, file_type)
+            
+            # Формируем результат
+            result = {
+                "documentation": documentation,  # Только документация
+                "code": code,  # Исходный код
+                "status": "success",
+                "metrics": {
+                    "time": round(elapsed_time, 2),
+                    "tokens": total_tokens,
+                    "speed": round(tokens_per_second, 2)
+                },
+                "generation_info": {
+                    "model": self.model,
+                    "total_tokens": total_tokens,
+                    "elapsed_time": elapsed_time,
+                    "chunks_received": response.get('eval_count', 0),
+                    "chunks_total": response.get('eval_duration', 0)
                 }
-
-            except Exception as e:
-                error_msg = "Ошибка при генерации: {}".format(str(e))
-                logging.error(error_msg, exc_info=True)
-                return self._create_error_response(error_msg)
-
-        except ValueError as e:
-            # Пробрасываем ValueError наверх
-            raise
+            }
+            
+            return result
+            
         except Exception as e:
             error_msg = f"Неизвестная ошибка: {str(e)}"
             logging.error(error_msg, exc_info=True)
@@ -279,52 +214,52 @@ class OllamaClient:
 
     def _create_documentation_prompt(self, code: str, file_type: str) -> str:
         """Создает промпт для генерации документации."""
-        # Проверка поддерживаемых типов
-        if file_type not in ['java', 'kotlin']:
-            raise ValueError(f"Неподдерживаемый тип файла: {file_type}")
+        # Выбираем правила документирования в зависимости от типа файла
+        if file_type == "kotlin":
+            doc_rules = """[ПРАВИЛА ДОКУМЕНТИРОВАНИЯ KDOC]
+1. Документация классов:
+   - Описание назначения и функциональности
+   - Описание компонентов и их взаимодействия
+   - @property для свойств
+   - @constructor для конструкторов
+   - @throws для исключений
 
-        doc_format = "KDoc" if file_type == "kotlin" else "JavaDoc"
+2. Документация методов:
+   - Описание назначения и логики
+   - @param для параметров
+   - @return для возвращаемого значения
+   - @throws для исключений
+   - @see для связанных элементов"""
+        else:  # java
+            doc_rules = """[ПРАВИЛА ДОКУМЕНТИРОВАНИЯ JAVADOC]
+1. Документация классов:
+   - Описание назначения и функциональности
+   - Описание компонентов и взаимодействия
+   - @see для связанных классов
 
-        prompt_template = f"""[СИСТЕМНЫЕ ТРЕБОВАНИЯ]
-Вы - опытный разработчик, создающий документацию в формате {doc_format} на русском языке.
+2. Документация методов:
+   - Описание назначения и логики
+   - @param для параметров
+   - @return для возвращаемого значения
+   - @throws для исключений"""
 
-[ПРАВИЛА ДОКУМЕНТИРОВАНИЯ]
-1. Создать подробную документацию для каждого класса:
-   - Описание назначения класса
-   - Основные возможности
-   - Примеры использования
-   - Зависимости и требования
+        prompt_template = f"""Вы - опытный разработчик, создающий документацию на русском языке.
+Ваша задача - добавить подробную документацию к коду.
 
-2. Документировать все методы:
-   - Подробное описание функциональности
-   - Все параметры с типами и описанием
-   - Возвращаемые значения
-   - Исключения и условия их возникновения
+{doc_rules}
 
-3. Документировать важные поля:
-   - Назначение поля
-   - Допустимые значения
-   - Влияние на работу класса
+[ТРЕБОВАНИЯ]
+1. Документация на русском языке
+2. Документировать каждый класс и метод
+3. Не добавлять @author, @version, @since
+4. Документация в формате /** ... */
+5. Вернуть документированный код
 
-4. Особые требования:
-   - Вся документация на русском языке
-   - Использовать стандартные теги {doc_format}
-   - НЕ ИЗМЕНЯТЬ оригинальный код
-   - Добавлять ТОЛЬКО документацию
-   - Документация должна быть в формате /** ... */
-   - Каждый документируемый элемент должен иметь описание
-
-[ФОРМАТ ОТВЕТА]
-1. Верните ТОЛЬКО код с добавленной документацией
-2. НЕ добавляйте никаких пояснений до или после кода
-3. НЕ изменяйте оригинальный код
-4. Добавляйте документацию ТОЛЬКО в формате /** ... */
-
-[КОД ДЛЯ ДОКУМЕНТИРОВАНИЯ]
+[КОД]
 {code}
 
 [КОНЕЦ КОДА]
-Пожалуйста, верните документированный код без дополнительных пояснений."""
+Пожалуйста, верните документированный код."""
         return prompt_template
 
     def _create_error_response(self, error_message: str) -> Dict:
@@ -333,3 +268,89 @@ class OllamaClient:
             "error": error_message,
             "code": ""
         }
+
+    def _get_cache_path(self, code: str, file_type: str) -> str:
+        """Генерирует путь к кэш-файлу на основе хэша кода."""
+        import hashlib
+        import os
+        
+        # Создаем хэш кода
+        code_hash = hashlib.md5(code.encode()).hexdigest()
+        
+        # Создаем директорию для кэша если её нет
+        cache_dir = os.path.join(os.getcwd(), '.cache', 'docs')
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # Возвращаем путь к файлу кэша
+        return os.path.join(cache_dir, f"{code_hash}_{file_type}.json")
+
+    def _save_to_cache(self, cache_path: str, result: dict):
+        """Сохраняет результат в кэш."""
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+            logging.info(f"Результат сохранен в кэш: {cache_path}")
+        except Exception as e:
+            logging.warning(f"Не удалось сохранить кэш: {str(e)}")
+
+    def _load_from_cache(self, cache_path: str) -> Optional[dict]:
+        """Загружает результат из кэша."""
+        try:
+            if os.path.exists(cache_path):
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    result = json.load(f)
+                    logging.info(f"Результат загружен из кэша: {cache_path}")
+                    return result
+            else:
+                logging.info(f"Кэш не найден: {cache_path}")
+        except Exception as e:
+            logging.warning(f"Не удалось загрузить кэш: {str(e)}")
+        return None
+
+    def _save_test_result(self, code: str, documentation: str, file_type: str) -> None:
+        """Сохраняет результат для тестов."""
+        try:
+            # Создаем директорию для результатов в папке .cache
+            results_dir = os.path.join(os.getcwd(), '.cache', 'test_results')
+            os.makedirs(results_dir, exist_ok=True)
+            
+            # Генерируем имя файла на основе хеша кода
+            code_hash = hashlib.md5(code.encode()).hexdigest()[:8]
+            result_file = os.path.join(results_dir, f'doc_{code_hash}.{file_type}')
+            
+            # Очищаем документацию от маркеров кода
+            clean_doc = documentation.strip()
+            
+            # Убираем маркеры кода в начале и конце
+            if '```' in clean_doc:
+                parts = clean_doc.split('```')
+                for part in parts:
+                    if '/**' in part:
+                        clean_doc = part.strip()
+                        break
+            
+            # Убираем маркер языка, если он остался в начале
+            lines = clean_doc.split('\n')
+            if lines[0].lower() in ['java', 'kotlin']:
+                clean_doc = '\n'.join(lines[1:])
+            
+            # Сохраняем только документацию
+            with open(result_file, 'w', encoding='utf-8') as f:
+                f.write(clean_doc)
+            
+            logging.info(f"\nРезультат сохранен в файл: {result_file}")
+            
+        except Exception as e:
+            logging.error(f"Ошибка при сохранении результата: {str(e)}")
+            raise
+
+    def _create_empty_java_doc(self, code: str) -> str:
+        """Создает пустую Java документацию для класса."""
+        class_name = re.search(r'class\s+(\w+)', code)
+        if not class_name:
+            return "/** Документация отсутствует */"
+        
+        return f"""/**
+ * Класс {class_name.group(1)}.
+ */"""
