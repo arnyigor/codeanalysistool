@@ -88,38 +88,73 @@ class OllamaClient:
         # Минимум 200 токенов, максимум 3000
         return max(200, min(estimated_tokens, 3000))
 
-    def _get_model_params(self, code: str, template_size: int, file_type: str) -> dict:
+    def _get_model_params(self, code: str, prompt_size: int, file_type: str, context: Optional[Dict[str, str]] = None) -> dict:
         """Формирует параметры запроса к модели."""
-        # Используем меньший контекст для документации
-        OPTIMAL_CONTEXT = 2048
-
+        # Базовый системный промпт
+        BASE_SYSTEM_PROMPT_SIZE = 500  # ~500 токенов для базового системного промпта
+        
         # Оцениваем размеры в токенах (примерно 3 байта на токен)
-        input_tokens = (len(code.encode()) + template_size) // 3
+        code_tokens = len(code.encode()) // 3
+        template_tokens = prompt_size // 3
+        
+        # Оцениваем размер системного промпта с контекстом
+        system_tokens = BASE_SYSTEM_PROMPT_SIZE
+        context_size = 0
+        if context:
+            context_size = sum(
+                len(str(content).encode()) // 3 
+                for content in context.values() 
+                if content is not None
+            )
+            system_tokens += context_size
+        
+        # Общий размер входных данных
+        total_input_tokens = code_tokens + template_tokens + system_tokens
+        
+        # Определяем базовый размер контекста (минимум 2048)
+        base_context = max(2048, total_input_tokens * 2)  # x2 для места под ответ
+        
+        # Добавляем буфер, который растет с размером входных данных
+        buffer_size = min(1000, total_input_tokens // 4)  # Адаптивный буфер
+        
+        # Определяем максимальный безопасный размер контекста (80% от максимума модели)
+        max_safe_context = int(self.context_length * 0.8)
+        
+        # Вычисляем оптимальный размер контекста
+        OPTIMAL_CONTEXT = min(base_context + buffer_size, max_safe_context)
 
-        # Оцениваем размер документации (примерно 1/3 от размера кода)
-        doc_tokens = max(200, min(input_tokens // 3, 1000))
+        # Оцениваем размер документации (примерно 1/3 от размера кода + доп. токены для контекста)
+        doc_tokens = max(200, min(code_tokens // 3 + (context_size // 4), 2000))
 
         # Устанавливаем параметры
-        options = {
+        params = {
             "temperature": 0.2,  # Более низкая температура для более предсказуемой документации
             "top_p": 0.7,
-            "num_predict": doc_tokens + 200,  # Базовый размер + небольшой буфер
-            "num_ctx": OPTIMAL_CONTEXT
+            "num_tokens": doc_tokens + 200,  # Базовый размер + небольшой буфер
+            "context_length": OPTIMAL_CONTEXT
         }
 
         # Логируем параметры
         logging.info("\nПараметры запроса к модели:")
         logging.info(f"- Размер контекста: {OPTIMAL_CONTEXT} токенов")
-        logging.info(f"- Входной контекст: {input_tokens} токенов")
+        logging.info(f"- Базовый размер контекста: {base_context} токенов")
+        logging.info(f"- Размер буфера: {buffer_size} токенов")
+        logging.info(f"- Максимальный безопасный контекст: {max_safe_context} токенов")
+        logging.info(f"- Размер кода: {code_tokens} токенов")
+        logging.info(f"- Размер шаблона: {template_tokens} токенов")
+        logging.info(f"- Размер системного промпта: {system_tokens} токенов")
+        if context_size > 0:
+            logging.info(f"- Размер дополнительного контекста: {context_size} токенов")
+        logging.info(f"- Общий размер входных данных: {total_input_tokens} токенов")
         logging.info(f"- Оценка документации: {doc_tokens} токенов")
         logging.info(f"- Тип файла: {file_type}")
-        logging.info(f"- Температура: {options['temperature']}")
-        logging.info(f"- Top-p: {options['top_p']}")
-        logging.info(f"- Предсказание токенов: {options['num_predict']}")
+        logging.info(f"- Температура: {params['temperature']}")
+        logging.info(f"- Top-p: {params['top_p']}")
+        logging.info(f"- Предсказание токенов: {params['num_tokens']}")
 
-        return {"options": options}
+        return params
 
-    def analyze_code(self, code: str, file_type: str) -> Optional[dict]:
+    def analyze_code(self, code: str, file_type: str, context: Optional[Dict[str, str]] = None) -> Optional[dict]:
         """Анализирует код и генерирует документацию."""
         # Проверяем тип файла
         if file_type != 'kotlin':
@@ -133,17 +168,33 @@ class OllamaClient:
         logging.info(f"Тип файла: {file_type}")
 
         try:
-            # Системный промпт для модели
-            system_prompt = """Вы - опытный разработчик, создающий документацию ИСКЛЮЧИТЕЛЬНО на РУССКОМ языке в формате KDoc.  
+            # Формируем системный промпт
+            system_prompt = ""
+
+            # Добавляем контекстную информацию если она есть
+            if context:
+                system_prompt += "=== Контекстная информация ===\n"
+                for title, content in context.items():
+                    if content is not None:
+                        system_prompt += f"\n--- {title} ---\n{content}\n\n"
+
+            # Добавляем основной системный промпт
+            system_prompt += """Вы - опытный разработчик, создающий документацию ИСКЛЮЧИТЕЛЬНО на РУССКОМ языке в формате KDoc.  
 Ваша задача - добавить **полную и строгую документацию** к классу, используя только следующие аннотации:  
 `@property`, `@constructor`, `@param`, `@return`, `@see`
-Вернуть ТОЛЬКО документацию, БЕЗ КОДА"""
+Вернуть ТОЛЬКО документацию, БЕЗ КОДА
 
-            # Создаем промпт с кодом
-            prompt = self._create_documentation_prompt(code, file_type)
+При наличии контекстной информации:
+1. Учитывайте связи между компонентами
+2. Отражайте зависимости в документации
+3. Используйте информацию о реализации
+4. Добавляйте ссылки на связанные классы"""
+
+            # Создаем промпт с кодом и контекстом
+            prompt = self._create_documentation_prompt(code, file_type, context)
 
             # Получаем адаптивные параметры запроса
-            model_params = self._get_model_params(code, len(prompt.encode()), file_type)
+            model_params = self._get_model_params(code, len(prompt.encode()), file_type, context)
 
             logging.info("\nОтправляем запрос к модели...")
             start_time = time.time()
@@ -153,7 +204,7 @@ class OllamaClient:
                 model=self.model,
                 prompt=prompt,
                 system=system_prompt,
-                **model_params
+                options=model_params
             )
 
             # Получаем метрики
@@ -161,9 +212,14 @@ class OllamaClient:
             total_tokens = response.get('total_tokens', 0)
             tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
 
+            # Вычисляем размер контекста
+            context_size = 0
+            if context:
+                context_size = sum(len(content.encode()) // 3 for content in context.values())
+
             # Получаем документацию из ответа
             documentation = response.get('response', '').strip()
-            
+
             # Проверяем наличие документации
             if not documentation or not "/**" in documentation:
                 documentation = self._create_empty_java_doc(code)
@@ -179,7 +235,8 @@ class OllamaClient:
                 "metrics": {
                     "time": round(elapsed_time, 2),
                     "tokens": total_tokens,
-                    "speed": round(tokens_per_second, 2)
+                    "speed": round(tokens_per_second, 2),
+                    "context_size": context_size
                 }
             }
 
@@ -190,12 +247,20 @@ class OllamaClient:
             logging.error(error_msg, exc_info=True)
             return self._create_error_response(error_msg)
 
-    def _create_documentation_prompt(self, code: str, file_type: str) -> str:
+    def _create_documentation_prompt(self, code: str, file_type: str, context: Optional[Dict[str, str]] = None) -> str:
         """Создает промпт для генерации документации."""
         if file_type != 'kotlin':
             raise ValueError(f"Неподдерживаемый тип файла: {file_type}. Поддерживается только Kotlin.")
 
-        prompt_template = """[ПРАВИЛА ДОКУМЕНТИРОВАНИЯ KDOC]
+        # Формируем контекстную информацию
+        context_section = ""
+        if context:
+            context_section = "\n=== Контекстная информация ===\n"
+            for title, content in context.items():
+                if content is not None:
+                    context_section += f"\n--- {title} ---\n{content}\n"
+
+        prompt_template = f"""[ПРАВИЛА ДОКУМЕНТИРОВАНИЯ KDOC]
 #### ПРАВИЛА ДОКУМЕНТИРОВАНИЯ:
 **Документация классов:**
    - Начните с подробного описания назначения класса и его роли в системе.
@@ -251,7 +316,9 @@ class OllamaClient:
 [КОД]
 {code}
 [КОНЕЦ КОДА]
-Пожалуйста, верните **ТОЛЬКО документацию** в указанном формате, строго соблюдая структуру и требования, БЕЗ КОДА."""
+{context_section}
+Пожалуйста, верните **ТОЛЬКО документацию** в указанном формате, строго соблюдая структуру и требования, БЕЗ КОДА.
+Учитывайте контекстную информацию при её наличии."""
 
         return prompt_template
 
