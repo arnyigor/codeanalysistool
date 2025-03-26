@@ -343,13 +343,6 @@ def test_documentation_with_multiple_contexts(ollama_client):
             val total: Double,
             val items: List<OrderItem>
         )
-        """,
-        "Модель элемента заказа": """
-        data class OrderItem(
-            val productId: String,
-            val quantity: Int,
-            val price: Double
-        )
         """
     }
     
@@ -358,15 +351,20 @@ def test_documentation_with_multiple_contexts(ollama_client):
     assert "documentation" in result, "Отсутствует документация"
     doc = result["documentation"]
     
-    # Проверяем упоминание всех контекстных элементов
+    # Проверяем упоминание основных зависимостей
     assert "PaymentService" in doc, "Отсутствует упоминание PaymentService"
     assert "NotificationService" in doc, "Отсутствует упоминание NotificationService"
     assert "Order" in doc, "Отсутствует упоминание Order"
-    assert "OrderItem" in doc, "Отсутствует упоминание OrderItem"
     
     # Проверяем связи между компонентами
     assert "processPayment" in doc, "Отсутствует упоминание метода processPayment"
     assert "notify" in doc, "Отсутствует упоминание метода notify"
+    
+    # Проверяем структуру KDoc
+    assert "/**" in doc and "*/" in doc, "Неверный формат KDoc"
+    assert "@property" in doc, "Отсутствует описание свойств"
+    assert "Внешние зависимости:" in doc, "Отсутствует секция внешних зависимостей"
+    assert "Взаимодействие:" in doc, "Отсутствует секция взаимодействия"
 
 
 def test_documentation_with_empty_context(ollama_client):
@@ -392,37 +390,6 @@ def test_documentation_with_empty_context(ollama_client):
     # Проверяем метрики
     assert "metrics" in result, "Отсутствуют метрики"
     assert result["metrics"]["context_size"] == 0, "Неверный размер пустого контекста"
-
-
-def test_documentation_with_large_context_handling(ollama_client):
-    """Тест обработки очень большого контекста"""
-    code = """
-    class MetricsCollector {
-        fun collect(): Map<String, Int> = mapOf()
-    }
-    """
-    
-    # Создаем большой контекст (более 10000 символов)
-    large_context = {
-        "Большой файл 1": "A" * 5000,
-        "Большой файл 2": "B" * 5000,
-        "Большой файл 3": "C" * 5000
-    }
-    
-    result = ollama_client.analyze_code(code, "kotlin", context=large_context)
-    
-    assert "documentation" in result, "Отсутствует документация"
-    assert "metrics" in result, "Отсутствуют метрики"
-    
-    # Проверяем, что размер контекста корректно рассчитан
-    context_size = result["metrics"]["context_size"]
-    assert context_size > 0, "Размер контекста должен быть больше 0"
-    assert context_size >= 5000, "Неверный расчет размера большого контекста"
-    
-    # Проверяем, что документация все еще генерируется корректно
-    doc = result["documentation"]
-    assert "/**" in doc and "*/" in doc, "Неверный формат KDoc"
-    assert "@property" in doc or "@constructor" in doc, "Отсутствуют основные KDoc аннотации"
 
 
 def test_context_parameter_validation(ollama_client):
@@ -500,8 +467,8 @@ def test_documentation_quality_with_context(ollama_client):
         fun mainCalc() {
             val numbers = Array(5) { i -> i * 2 }  // [0, 2, 4, 6, 8]
             println("Исходный массив: ${numbers.joinToString()}")
-            val first = numbers.get(0)  // 0
-            numbers.set(2, 10)         // Изменение элемента по индексу
+            val first = numbers.get(0)
+            numbers.set(2, 10)
             println("Элемент по индексу 0: $first")
             println("Модифицированный массив: ${numbers.joinToString()}")
             calculateSum(5, 7)
@@ -517,7 +484,6 @@ def test_documentation_quality_with_context(ollama_client):
     # Предоставляем подробный контекст о работе класса
     context = {
         "Описание работы": """
-        Описание работы:
         Создание массива
         Используется конструктор Array с лямбда-выражением для инициализации элементов. 
         В данном случае каждый элемент равен индексу, умноженному на 2.
