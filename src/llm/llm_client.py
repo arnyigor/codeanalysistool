@@ -90,20 +90,20 @@ class OllamaClient:
 
     def _get_model_params(self, code: str, template_size: int, file_type: str) -> dict:
         """Формирует параметры запроса к модели."""
-        # Фиксированный размер контекста для файлов до 1000 строк
-        OPTIMAL_CONTEXT = 4096
+        # Используем меньший контекст для документации
+        OPTIMAL_CONTEXT = 2048
 
-        # Оцениваем размеры в токенах
+        # Оцениваем размеры в токенах (примерно 3 байта на токен)
         input_tokens = (len(code.encode()) + template_size) // 3
 
-        # Оцениваем размер документации
-        doc_tokens = self._estimate_doc_size(code)
+        # Оцениваем размер документации (примерно 1/3 от размера кода)
+        doc_tokens = max(200, min(input_tokens // 3, 1000))
 
         # Устанавливаем параметры
         options = {
-            "temperature": 0.3,  # Более консервативное значение для документации
+            "temperature": 0.2,  # Более низкая температура для более предсказуемой документации
             "top_p": 0.7,
-            "num_predict": doc_tokens + 500,  # Базовый размер + буфер
+            "num_predict": doc_tokens + 200,  # Базовый размер + небольшой буфер
             "num_ctx": OPTIMAL_CONTEXT
         }
 
@@ -122,8 +122,8 @@ class OllamaClient:
     def analyze_code(self, code: str, file_type: str) -> Optional[dict]:
         """Анализирует код и генерирует документацию."""
         # Проверяем тип файла
-        if file_type not in ['java', 'kotlin']:
-            raise ValueError(f"Неподдерживаемый тип файла: {file_type}")
+        if file_type != 'kotlin':
+            raise ValueError(f"Неподдерживаемый тип файла: {file_type}. Поддерживается только Kotlin.")
 
         # Проверяем наличие кода
         if not code or not code.strip():
@@ -132,28 +132,27 @@ class OllamaClient:
         logging.info(f"\n{'=' * 50}\nНачало анализа кода\n{'=' * 50}")
         logging.info(f"Тип файла: {file_type}")
 
-        code_size = len(code.encode())
-        logging.info(f"Размер кода: {code_size} байт")
-
         try:
+            # Системный промпт для модели
+            system_prompt = """Вы - опытный разработчик, создающий документацию ИСКЛЮЧИТЕЛЬНО на РУССКОМ языке в формате KDoc.  
+Ваша задача - добавить **полную и строгую документацию** к классу, используя только следующие аннотации:  
+`@property`, `@constructor`, `@param`, `@return`, `@see`
+Вернуть ТОЛЬКО документацию, БЕЗ КОДА"""
+
             # Создаем промпт с кодом
             prompt = self._create_documentation_prompt(code, file_type)
 
             # Получаем адаптивные параметры запроса
             model_params = self._get_model_params(code, len(prompt.encode()), file_type)
 
-            # Добавляем системный промпт к параметрам
-            if "[КОД]" in prompt:
-                system_prompt = prompt.split("[КОД]")[0].strip()
-                model_params['system'] = system_prompt
-
             logging.info("\nОтправляем запрос к модели...")
             start_time = time.time()
 
-            # Отправляем запрос к модели с полным промптом
+            # Отправляем запрос к модели с системным промптом
             response = ollama.generate(
                 model=self.model,
-                prompt=prompt,  # Отправляем полный промпт с кодом
+                prompt=prompt,
+                system=system_prompt,
                 **model_params
             )
 
@@ -162,48 +161,25 @@ class OllamaClient:
             total_tokens = response.get('total_tokens', 0)
             tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
 
-            # Очищаем ответ
-            clean_response = response.get('response', '').strip()
-            logging.info(f"\nОтвет модели:\n{clean_response}")
-
-            # Извлекаем документацию из ответа и очищаем от маркеров языка
-            documentation = clean_response
-            if "```" in clean_response:
-                code_parts = clean_response.split("```")
-                for part in code_parts:
-                    if part.strip() and "/**" in part:
-                        # Убираем маркер языка, если он есть
-                        lines = part.strip().split('\n')
-                        if lines[0].lower() in ['java', 'kotlin']:
-                            documentation = '\n'.join(lines[1:])
-                        else:
-                            documentation = part.strip()
-                        break
-
-            # Если нет документации, создаем базовую
-            if not "/**" in documentation:
+            # Получаем документацию из ответа
+            documentation = response.get('response', '').strip()
+            
+            # Проверяем наличие документации
+            if not documentation or not "/**" in documentation:
                 documentation = self._create_empty_java_doc(code)
                 logging.warning("Модель вернула некорректный ответ, создана базовая документация")
 
             # Сохраняем результат для тестов
-            self._save_test_result(code, documentation, file_type)
+            self._save_test_result(documentation, file_type)
 
             # Формируем результат
             result = {
-                "documentation": documentation,  # Только документация
-                "code": code,  # Исходный код
+                "documentation": documentation,
                 "status": "success",
                 "metrics": {
                     "time": round(elapsed_time, 2),
                     "tokens": total_tokens,
                     "speed": round(tokens_per_second, 2)
-                },
-                "generation_info": {
-                    "model": self.model,
-                    "total_tokens": total_tokens,
-                    "elapsed_time": elapsed_time,
-                    "chunks_received": response.get('eval_count', 0),
-                    "chunks_total": response.get('eval_duration', 0)
                 }
             }
 
@@ -216,32 +192,24 @@ class OllamaClient:
 
     def _create_documentation_prompt(self, code: str, file_type: str) -> str:
         """Создает промпт для генерации документации."""
-        # Выбираем правила документирования в зависимости от типа файла
-        if file_type == "kotlin":
-            doc_rules = """[ПРАВИЛА ДОКУМЕНТИРОВАНИЯ KDOC]
+        if file_type != 'kotlin':
+            raise ValueError(f"Неподдерживаемый тип файла: {file_type}. Поддерживается только Kotlin.")
+
+        prompt_template = """[ПРАВИЛА ДОКУМЕНТИРОВАНИЯ KDOC]
 #### ПРАВИЛА ДОКУМЕНТИРОВАНИЯ:
-1. **Документация классов:**
-   - Начните с краткого описания назначения класса и его роли в системе.
+**Документация классов:**
+   - Начните с подробного описания назначения класса и его роли в системе.
    - Используйте `@property` для описания полей с указанием их целей.
    - В `@constructor` укажите все параметры конструктора и их назначение.
    - Добавьте `@see` для связанных классов, интерфейсов или методов.
-   - В разделе `@throws` укажите все возможные исключения (или "Нет исключений").
    - В конце добавьте **секции**:
      - **Внешние зависимости:** список библиотек/классов, напрямую используемых классом (без родительских классов/интерфейсов).
      - **Взаимодействие:** описание, как класс взаимодействует с другими компонентами (например, "вызывает X.method() для Y").
 
-2. **Документация методов:**
-   - Описание должно отражать **логику** и **цель** метода.
-   - Для каждого параметра в `@param` укажите тип, назначение и допустимые значения (если нужно).
-   - В `@return` уточните возвращаемое значение (или "Нет возврата").
-   - В `@throws` укажите исключения с условиями их возникновения.
-   - В `@see` ссылайтесь на связанные методы или классы.
-   - Добавьте описание **взаимодействий** с другими компонентами (например, "использует landingsBuilderInteractor.submit()").
-
 #### ДОПОЛНИТЕЛЬНЫЕ УСЛОВИЯ:
 - Если в коде уже присутствует KDoc, обновите его:
   1. Уберите запрещённые элементы (`@author`, `@version`).
-  2. Добавьте недостающие аннотации (например, `@see`, `@throws`).
+  2. Добавьте недостающие аннотации (например, `@see`).
   3. Дополните разделы "Внешние зависимости" и "Взаимодействие".
   4. Сохраните полезные части старого KDoc, если они корректны.
   5. Исправьте ошибки в описаниях (например, устаревшие методы).
@@ -261,8 +229,6 @@ class OllamaClient:
  * @constructor [описание конструктора]
  * @param [параметр] [описание]
  * 
- * @throws [исключения] (или "Нет исключений")
- * 
  * @see [ссылки]
  * 
  * **Внешние зависимости:**
@@ -273,89 +239,6 @@ class OllamaClient:
  * - [описание взаимодействия]
  */
 ```
-
-Для метода:
-```
-/**
- * [Описание метода]
- * 
- * @param [параметр] [описание]
- * @return [описание возврата]
- * @throws [исключения]
- * 
- * **Взаимодействие:**
- * - [описание взаимодействия с компонентами]
- * 
- * @see [связанные методы/классы]
- */
-```"""
-        else:  # java
-            doc_rules = """[ПРАВИЛА ДОКУМЕНТИРОВАНИЯ JAVADOC]
-#### ПРАВИЛА ДОКУМЕНТИРОВАНИЯ:
-1. **Документация классов:**
-   - Начните с краткого описания назначения класса и его роли в системе.
-   - Используйте `@property` для описания полей с указанием их целей.
-   - В `@constructor` укажите все параметры конструктора и их назначение.
-   - Добавьте `@see` для связанных классов, интерфейсов или методов.
-   - В разделе `@throws` укажите все возможные исключения (или "Нет исключений").
-   - В конце добавьте **секции**:
-     - **Внешние зависимости:** список библиотек/классов, напрямую используемых классом (без родительских классов/интерфейсов).
-     - **Взаимодействие:** описание, как класс взаимодействует с другими компонентами (например, "вызывает X.method() для Y").
-
-2. **Документация методов:**
-   - Описание должно отражать **логику** и **цель** метода.
-   - Для каждого параметра в `@param` укажите тип, назначение и допустимые значения (если нужно).
-   - В `@return` уточните возвращаемое значение (или "Нет возврата").
-   - В `@throws` укажите исключения с условиями их возникновения.
-   - В `@see` ссылайтесь на связанные методы или классы.
-   - Добавьте описание **взаимодействий** с другими компонентами (например, "использует landingsBuilderInteractor.submit()").
-
-#### ПОРЯДОК ВЫВОДА:
-Для класса:
-```
-/**
- * [Краткое описание класса]
- * 
- * @property [название] [описание]
- * @property ...
- * 
- * @constructor [описание конструктора]
- * @param [параметр] [описание]
- * 
- * @throws [исключения] (или "Нет исключений")
- * 
- * @see [ссылки]
- * 
- * **Внешние зависимости:**
- * - [зависимость 1]
- * - [зависимость 2]
- * 
- * **Взаимодействие:**
- * - [описание взаимодействия]
- */
-```
-
-Для метода:
-```
-/**
- * [Описание метода]
- * 
- * @param [параметр] [описание]
- * @return [описание возврата]
- * @throws [исключения]
- * 
- * **Взаимодействие:**
- * - [описание взаимодействия с компонентами]
- * 
- * @see [связанные методы/классы]
- */
-```"""
-
-        prompt_template = f"""Вы - опытный разработчик, создающий документацию ИСКЛЮЧИТЕЛЬНО на РУССКОМ языке в формате KDoc.  
-Ваша задача - добавить **полную и строгую документацию** к классам и методам, используя только следующие аннотации:  
-`@property`, `@constructor`, `@param`, `@return`, `@throws`, `@see`.
-
-{doc_rules}
 
 #### ТРЕБОВАНИЯ:
 - Документация **ТОЛЬКО** в формате KDoc (/** ... */).
@@ -367,9 +250,9 @@ class OllamaClient:
 
 [КОД]
 {code}
-
 [КОНЕЦ КОДА]
 Пожалуйста, верните **ТОЛЬКО документацию** в указанном формате, строго соблюдая структуру и требования, БЕЗ КОДА."""
+
         return prompt_template
 
     def _create_error_response(self, error_message: str) -> Dict:
@@ -418,45 +301,26 @@ class OllamaClient:
             logging.warning(f"Не удалось загрузить кэш: {str(e)}")
         return None
 
-    def _save_test_result(self, code: str, documentation: str, file_type: str) -> None:
-        """Сохраняет результат для тестов."""
+    def _save_test_result(self, documentation: str, file_type: str):
+        """Сохраняет результат теста в файл."""
         try:
-            # Создаем директорию для результатов в папке .cache
-            results_dir = os.path.join(os.getcwd(), '.cache', 'test_results')
-            os.makedirs(results_dir, exist_ok=True)
+            # Создаем директорию для результатов тестов
+            test_results_dir = os.path.join(os.getcwd(), '.cache','test_results')
+            os.makedirs(test_results_dir, exist_ok=True)
 
-            # Генерируем имя файла на основе хеша кода
-            code_hash = hashlib.md5(code.encode()).hexdigest()[:8]
+            # Генерируем уникальное имя файла
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"test_result_{timestamp}_{file_type}.txt"
+            filepath = os.path.join(test_results_dir, filename)
 
-            # Определяем расширение файла
-            extension = 'kt' if file_type == 'kotlin' else file_type
-            result_file = os.path.join(results_dir, f'doc_{code_hash}.{extension}')
+            # Сохраняем документацию
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(documentation)
 
-            # Очищаем документацию от маркеров кода
-            clean_doc = documentation.strip()
-
-            # Убираем маркеры кода в начале и конце
-            if '```' in clean_doc:
-                parts = clean_doc.split('```')
-                for part in parts:
-                    if '/**' in part:
-                        clean_doc = part.strip()
-                        break
-
-            # Убираем маркер языка, если он остался в начале
-            lines = clean_doc.split('\n')
-            if lines[0].lower() in ['java', 'kotlin']:
-                clean_doc = '\n'.join(lines[1:])
-
-            # Сохраняем только документацию
-            with open(result_file, 'w', encoding='utf-8') as f:
-                f.write(clean_doc)
-
-            logging.info(f"\nРезультат сохранен в файл: {result_file}")
+            logging.info(f"Результат сохранен в файл: {filepath}")
 
         except Exception as e:
-            logging.error(f"Ошибка при сохранении результата: {str(e)}")
-            raise
+            logging.error(f"Ошибка при сохранении результата теста: {str(e)}")
 
     def _create_empty_java_doc(self, code: str) -> str:
         """Создает пустую Java документацию для класса."""

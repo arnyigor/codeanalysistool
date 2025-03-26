@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from code_analyzer.code_analyzer import CodeAnalyzer
+from src.code_analyzer.code_analyzer import CodeAnalyzer
 
 
 def setup_logging(verbose: bool, clear_logs: bool = False):

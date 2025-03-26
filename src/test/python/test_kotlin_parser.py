@@ -1,5 +1,5 @@
 import pytest
-from src.ast.kotlin_parser import KotlinASTParser
+from code_ast.kotlin_parser import KotlinASTParser
 
 @pytest.fixture
 def parser():
@@ -8,7 +8,6 @@ def parser():
 def test_parser_initialization(parser):
     """Проверяем, что парсер инициализируется корректно."""
     assert parser is not None
-    assert parser.kotlin_language is not None
     assert parser.parser is not None
 
 def test_parse_simple_class(parser):
@@ -29,7 +28,7 @@ def test_parse_simple_class(parser):
     # Проверяем базовую структуру
     assert "imports" in result
     assert "package" in result
-    assert "classes" in result
+    assert "declarations" in result
     
     # Проверяем пакет
     assert result["package"] == "com.example.app"
@@ -40,9 +39,10 @@ def test_parse_simple_class(parser):
     assert "import androidx.fragment.app.Fragment" in result["imports"]
     
     # Проверяем информацию о классе
-    assert len(result["classes"]) == 1
-    class_info = result["classes"][0]
+    assert len(result["declarations"]) == 1
+    class_info = result["declarations"][0]
     assert class_info["name"] == "SimpleClass"
+    assert class_info["type"] == "class"
 
 def test_parse_annotated_class(parser):
     """Тест парсинга класса с аннотациями."""
@@ -60,8 +60,9 @@ def test_parse_annotated_class(parser):
     result = parser.parse_code(code)
     
     # Проверяем аннотации
-    class_info = result["classes"][0]
+    class_info = result["declarations"][0]
     assert "@AndroidEntryPoint" in class_info["annotations"]
+    assert class_info["type"] == "class"
 
 def test_parse_class_with_inheritance(parser):
     """Тест парсинга класса с наследованием."""
@@ -78,5 +79,8 @@ def test_parse_class_with_inheritance(parser):
     result = parser.parse_code(code)
     
     # Проверяем наследование
-    class_info = result["classes"][0]
+    class_info = result["declarations"][0]
     assert class_info["name"] == "InheritedClass"
+    assert class_info["type"] == "class"
+    assert class_info["superclass"] == "Fragment"
+    assert "OnSearchListener" in class_info["implements"]
