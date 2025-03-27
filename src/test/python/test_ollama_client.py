@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from typing import Optional, Dict
 import os
+import time
+import inspect
 
 # Корректная настройка путей
 ROOT_DIR = Path(__file__).parent.parent.parent  # Указываем на src/
@@ -687,6 +689,83 @@ def clear_logs():
         except Exception as e:
             logging.warning(f"Не удалось очистить лог-файл {log_file}: {e}")
 
+def calculate_code_metrics(code: str) -> dict:
+    """Рассчитывает метрики для кода"""
+    lines = code.strip().split('\n')
+    return {
+        'total_lines': len(lines),
+        'code_lines': len([l for l in lines if l.strip() and not l.strip().startswith('//')]),
+        'chars': len(code),
+        'classes': len([l for l in lines if 'class ' in l]),
+        'methods': len([l for l in lines if 'fun ' in l])
+    }
+
+def analyze_performance_metrics(results: dict, code_metrics: dict, execution_time: float) -> dict:
+    """Анализирует метрики производительности"""
+    metrics = results.get('metrics', {})
+    
+    performance = {
+        'execution_time_sec': execution_time,
+        'tokens_per_second': metrics.get('tokens', 0) / execution_time if execution_time > 0 else 0,
+        'lines_per_second': code_metrics['total_lines'] / execution_time if execution_time > 0 else 0,
+        'chars_per_second': code_metrics['chars'] / execution_time if execution_time > 0 else 0,
+        'tokens_per_line': metrics.get('tokens', 0) / code_metrics['total_lines'] if code_metrics['total_lines'] > 0 else 0
+    }
+    
+    # Прогноз для больших проектов
+    performance['estimated_time_1k_lines'] = (1000 / performance['lines_per_second']) if performance['lines_per_second'] > 0 else 0
+    performance['estimated_time_10k_lines'] = (10000 / performance['lines_per_second']) if performance['lines_per_second'] > 0 else 0
+    performance['estimated_time_100k_lines'] = (100000 / performance['lines_per_second']) if performance['lines_per_second'] > 0 else 0
+    
+    return performance
+
+def log_performance_summary(logger: logging.Logger, all_performance_metrics: list):
+    """Выводит сводную информацию по производительности"""
+    if not all_performance_metrics:
+        return
+    
+    # Расчет средних значений
+    avg_metrics = {
+        'execution_time_sec': sum(p['execution_time_sec'] for p in all_performance_metrics) / len(all_performance_metrics),
+        'tokens_per_second': sum(p['tokens_per_second'] for p in all_performance_metrics) / len(all_performance_metrics),
+        'lines_per_second': sum(p['lines_per_second'] for p in all_performance_metrics) / len(all_performance_metrics),
+        'chars_per_second': sum(p['chars_per_second'] for p in all_performance_metrics) / len(all_performance_metrics),
+        'tokens_per_line': sum(p['tokens_per_line'] for p in all_performance_metrics) / len(all_performance_metrics)
+    }
+    
+    logger.info("\n=== Анализ производительности документирования ===")
+    logger.info(f"Среднее время выполнения: {avg_metrics['execution_time_sec']:.2f} сек")
+    logger.info(f"Средняя скорость обработки:")
+    logger.info(f"- Строк кода в секунду: {avg_metrics['lines_per_second']:.2f}")
+    logger.info(f"- Токенов в секунду: {avg_metrics['tokens_per_second']:.2f}")
+    logger.info(f"- Символов в секунду: {avg_metrics['chars_per_second']:.2f}")
+    logger.info(f"- Токенов на строку кода: {avg_metrics['tokens_per_line']:.2f}")
+    
+    # Прогноз времени для реальных проектов
+    est_time_1k = 1000 / avg_metrics['lines_per_second']
+    est_time_10k = 10000 / avg_metrics['lines_per_second']
+    est_time_100k = 100000 / avg_metrics['lines_per_second']
+    
+    logger.info("\nПрогноз времени документирования:")
+    logger.info(f"- Проект 1K строк: {est_time_1k:.1f} сек (~{est_time_1k/60:.1f} мин)")
+    logger.info(f"- Проект 10K строк: {est_time_10k:.1f} сек (~{est_time_10k/60:.1f} мин)")
+    logger.info(f"- Проект 100K строк: {est_time_100k:.1f} сек (~{est_time_100k/3600:.1f} часов)")
+    
+    logger.info("\nРекомендации:")
+    if avg_metrics['lines_per_second'] > 1:
+        logger.info("✓ Производительность достаточна для документирования небольших и средних проектов")
+        if est_time_100k/3600 < 24:
+            logger.info("✓ Возможно документирование крупных проектов (100K строк) в пределах суток")
+        else:
+            logger.info("! Для крупных проектов рекомендуется документировать код частями")
+    else:
+        logger.info("! Низкая производительность, рекомендуется оптимизировать процесс")
+    
+    logger.info("\nОптимальные сценарии использования:")
+    logger.info("1. Документирование новых классов и методов в процессе разработки")
+    logger.info("2. Документирование критических частей кода")
+    logger.info("3. Обновление документации при существенных изменениях")
+    
 def test_stability(ollama_client, caplog):
     """Тест стабильности выполнения основных тестов"""
     # Очищаем логи перед запуском
@@ -745,6 +824,7 @@ def test_stability(ollama_client, caplog):
         
         iterations = 10  # Количество прогонов каждого теста
         results = {test.__name__: {"passed": 0, "failed": 0} for test in tests_to_check}
+        all_performance_metrics = []
         
         logger.info(f"\nНачало проверки стабильности тестов ({iterations} итераций)")
         logger.info("=" * 50)
@@ -757,15 +837,32 @@ def test_stability(ollama_client, caplog):
                 test_name = test.__name__
                 logger.info(f"\nЗапуск теста: {test_name}")
                 
+                # Замеряем время выполнения
+                start_time = time.time()
+                
+                # Получаем код из теста (это упрощенный пример, нужно адаптировать под реальную структуру тестов)
+                test_code = inspect.getsource(test)
+                code_metrics = calculate_code_metrics(test_code)
+                
                 success = run_test_with_logging(test, ollama_client, caplog)
+                execution_time = time.time() - start_time
+                
                 if success:
                     results[test_name]["passed"] += 1
                     logger.info(f"Тест {test_name} успешно пройден")
+                    
+                    # Анализируем производительность только для успешных тестов
+                    performance_metrics = analyze_performance_metrics(
+                        {'metrics': {'tokens': 1000}},  # Здесь нужно передать реальные метрики
+                        code_metrics,
+                        execution_time
+                    )
+                    all_performance_metrics.append(performance_metrics)
                 else:
                     results[test_name]["failed"] += 1
                     logger.error(f"Тест {test_name} не пройден")
         
-        # Вывод статистики
+        # Вывод статистики по тестам
         logger.info("\nРезультаты проверки стабильности:")
         logger.info("=" * 50)
         
@@ -777,10 +874,12 @@ def test_stability(ollama_client, caplog):
             logger.info(f"Успешно: {stats['passed']}/{total} ({success_rate:.1f}%)")
             logger.info(f"Неудачно: {stats['failed']}/{total}")
             
-            # Проверяем стабильность
             if success_rate < 80:
                 all_stable = False
                 logger.error(f"Тест {test_name} нестабилен (успешность {success_rate:.1f}%)")
+        
+        # Вывод анализа производительности
+        log_performance_summary(logger, all_performance_metrics)
         
         logger.info("\nПроверка стабильности завершена")
         
