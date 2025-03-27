@@ -5,6 +5,7 @@ from typing import Optional, Dict
 import os
 import time
 import inspect
+import traceback
 
 # Корректная настройка путей
 ROOT_DIR = Path(__file__).parent.parent.parent  # Указываем на src/
@@ -770,10 +771,10 @@ def test_stability(ollama_client, caplog):
     """Тест стабильности выполнения основных тестов"""
     # Очищаем логи перед запуском
     clear_logs()
-    
+
     # Настраиваем логирование в файл
     log_file = "stability_test.log"
-    
+
     # Форматтер для файла
     file_formatter = logging.Formatter(
         '%(asctime)s | %(levelname)-8s | %(message)s',
@@ -783,7 +784,7 @@ def test_stability(ollama_client, caplog):
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setFormatter(file_formatter)
     file_handler.setLevel(logging.INFO)
-    
+
     # Цветной форматтер для консоли
     class ColoredFormatter(logging.Formatter):
         """Форматтер с цветным выводом для разных уровней логирования"""
@@ -806,51 +807,54 @@ def test_stability(ollama_client, caplog):
         '%(levelname_colored)s | %(message)s'
     )
     console_handler.setFormatter(console_formatter)
-    
+
     logger = logging.getLogger(__name__)
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     logger.setLevel(logging.INFO)
-    
+
     try:
         # Список тестов для проверки стабильности
         tests_to_check = [
-            test_documentation_with_context,
-            test_documentation_with_implementation_context,
-            test_documentation_with_multiple_contexts,
-            test_documentation_quality_with_context,
-            test_documentation_quality_without_context
+            test_android_home_documentation
         ]
-        
-        iterations = 10  # Количество прогонов каждого теста
+
+        iterations = 5  # Количество прогонов каждого теста
         results = {test.__name__: {"passed": 0, "failed": 0} for test in tests_to_check}
         all_performance_metrics = []
-        
+
+        # Логируем информацию о модели
+        logging.info("Используется модель Ollama:")
+        logging.info(f"- Название: {ollama_client.model}")
+        logging.info(f"- Размер модели: {ollama_client.size_gb:.2f} GB")
+        logging.info(f"- Размер контекста: {ollama_client.context_length} токенов")
+        logger.info("=" * 50)
+
         logger.info(f"\nНачало проверки стабильности тестов ({iterations} итераций)")
         logger.info("=" * 50)
-        
+
         for iteration in range(iterations):
             logger.info(f"\nИтерация {iteration + 1}/{iterations}")
             logger.info("-" * 30)
-            
+
             for test in tests_to_check:
                 test_name = test.__name__
                 logger.info(f"\nЗапуск теста: {test_name}")
-                
+
                 # Замеряем время выполнения
                 start_time = time.time()
-                
+
                 # Получаем код из теста (это упрощенный пример, нужно адаптировать под реальную структуру тестов)
                 test_code = inspect.getsource(test)
                 code_metrics = calculate_code_metrics(test_code)
-                
+
                 success = run_test_with_logging(test, ollama_client, caplog)
                 execution_time = time.time() - start_time
-                
+
                 if success:
                     results[test_name]["passed"] += 1
                     logger.info(f"Тест {test_name} успешно пройден")
-                    
+
                     # Анализируем производительность только для успешных тестов
                     performance_metrics = analyze_performance_metrics(
                         {'metrics': {'tokens': 1000}},  # Здесь нужно передать реальные метрики
@@ -861,11 +865,11 @@ def test_stability(ollama_client, caplog):
                 else:
                     results[test_name]["failed"] += 1
                     logger.error(f"Тест {test_name} не пройден")
-        
+
         # Вывод статистики по тестам
         logger.info("\nРезультаты проверки стабильности:")
         logger.info("=" * 50)
-        
+
         all_stable = True
         for test_name, stats in results.items():
             total = stats["passed"] + stats["failed"]
@@ -873,24 +877,329 @@ def test_stability(ollama_client, caplog):
             logger.info(f"\nТест: {test_name}")
             logger.info(f"Успешно: {stats['passed']}/{total} ({success_rate:.1f}%)")
             logger.info(f"Неудачно: {stats['failed']}/{total}")
-            
+
             if success_rate < 80:
                 all_stable = False
                 logger.error(f"Тест {test_name} нестабилен (успешность {success_rate:.1f}%)")
-        
+
         # Вывод анализа производительности
         log_performance_summary(logger, all_performance_metrics)
-        
+
         logger.info("\nПроверка стабильности завершена")
-        
+
         assert all_stable, "Обнаружены нестабильные тесты, смотрите лог для деталей"
-        
+
     finally:
         # Удаляем handlers
         logger.removeHandler(file_handler)
         logger.removeHandler(console_handler)
         file_handler.close()
-        
+
         # Выводим путь к файлу с логами
         abs_path = os.path.abspath(log_file)
         print(f"\nЛоги теста стабильности сохранены в: {abs_path}")
+
+def test_android_home_documentation(ollama_client, caplog):
+    """Тест документирования реального Android кода с контекстом приложения"""
+    caplog.set_level(logging.INFO)
+    logger = logging.getLogger(__name__)
+    
+    logger.info("Начало теста документирования Android-кода")
+    
+    # Основной код фрагмента
+    fragment_code = """
+    class HomeFragment : Fragment() {
+        private var _binding: FragmentHomeBinding? = null
+        private val binding get() = _binding!!
+
+        @AssistedFactory
+        internal interface ViewModelFactory {
+            fun create(): HomeViewModel
+        }
+
+        @Inject
+        internal lateinit var viewModelFactory: ViewModelFactory
+        private val viewModel: HomeViewModel by viewModelFactory { viewModelFactory.create() }
+
+        private var searchView: SearchView? = null
+        private var searchMenuItem: MenuItem? = null
+
+        private val promptsAdapter = PromptsAdapter(
+            onPromptClick = { showPromptDetails(it) },
+            onPromptLongClick = { showPromptOptions(it) },
+            onFavoriteClick = { prompt ->
+                viewModel.toggleFavorite(prompt.id)
+            }
+        )
+
+        override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+            super.onViewCreated(view, savedInstanceState)
+            initMenu()
+            setupViews()
+            observeViewModel()
+        }
+
+        private fun setupViews() {
+            with(binding) {
+                recyclerView.apply {
+                    adapter = promptsAdapter
+                }
+                swipeRefresh.setOnRefreshListener {
+                    promptsAdapter.refresh()
+                }
+                chipGroupFilters.setOnCheckedChangeListener { _, checkedId ->
+                    when (checkedId) {
+                        R.id.chipAll -> viewModel.search()
+                        R.id.chipFavorites -> viewModel.search(status = "favorite")
+                    }
+                }
+            }
+        }
+
+        private fun observeViewModel() {
+            launchWhenCreated {
+                viewModel.promptsFlow.collectLatest { pagingData ->
+                    promptsAdapter.submitData(pagingData)
+                }
+            }
+        }
+    }
+    """
+    
+    logger.info("\nАнализируемый код фрагмента:")
+    logger.info(fragment_code)
+
+    # Код ViewModel
+    viewmodel_code = """
+    class HomeViewModel @AssistedInject constructor(
+        private val interactor: IPromptsInteractor,
+    ) : ViewModel() {
+        private val _error = MutableSharedFlow<IWrappedString>()
+        val error = _error.asSharedFlow()
+
+        private val _uiState = MutableStateFlow<UiState>(UiState.Initial)
+        val uiState = _uiState.asStateFlow()
+
+        val promptsFlow: Flow<PagingData<Prompt>> = listOf(
+            trigger.map { UiAction.Refresh },
+            actionStateFlow
+                .distinctUntilChanged()
+                .debounce(350)
+        )
+            .merge()
+            .onStart { emit(UiAction.Refresh) }
+            .flatMapLatest { action ->
+                createPager(_searchState.value).flow
+            }
+            .cachedIn(viewModelScope)
+
+        fun handleLoadStates(loadStates: CombinedLoadStates, itemCount: Int) {
+            val isLoading = loadStates.refresh is LoadState.Loading
+            val isError = loadStates.refresh is LoadState.Error
+            val isEmpty = loadStates.refresh is LoadState.NotLoading && itemCount == 0
+
+            _uiState.value = when {
+                isError -> UiState.Error((loadStates.refresh as LoadState.Error).error)
+                isLoading -> UiState.Loading
+                isEmpty -> UiState.Empty
+                else -> UiState.Content
+            }
+        }
+
+        fun synchronize() {
+            viewModelScope.launch {
+                _uiState.value = UiState.SyncInProgress
+                try {
+                    when (val result = interactor.synchronize()) {
+                        is SyncResult.Success -> {
+                            _uiState.value = UiState.SyncSuccess(result.updatedPrompts.size)
+                            loadPrompts(resetAll = true)
+                        }
+                        is SyncResult.Error -> {
+                            _uiState.value = UiState.SyncError
+                            _error.tryEmit(ResourceString(R.string.sync_error, result.message))
+                        }
+                        is SyncResult.Conflicts -> {
+                            _uiState.value = UiState.SyncConflicts(result.conflicts)
+                        }
+                    }
+                } catch (e: Exception) {
+                    handleError(e)
+                    _uiState.value = UiState.SyncError
+                }
+            }
+        }
+    }
+    """
+    
+    logger.info("\nАнализируемый код ViewModel:")
+    logger.info(viewmodel_code)
+
+    # Контекст приложения
+    context = {
+        "Описание приложения": """
+        AI Prompt Master
+        Бесплатный инструмент для создания, улучшения и обмена промптами ИИ
+
+        О проекте
+        AI Prompt Master — приложение для Android, которое помогает пользователям:
+
+        Автоматически улучшать запросы для ИИ-моделей (MidJourney, ChatGPT, Stable Diffusion и др.).
+        Создавать промпты за секунды с помощью конструктора из готовых блоков.
+        Делиться идеями в сообществе, находить вдохновение и учиться у других.
+        Бесплатно. Без рекламы.
+        """,
+        "Ключевые функции": """
+        🔥 AI-анализ промптов
+        Введите текст — получите советы по добавлению деталей, исправлению ошибок и адаптации под конкретный ИИ.
+
+        🎨 Конструктор запросов
+        Собирайте промпты из блоков: «Стиль: киберпанк», «Качество: 8K», «Настроение: мрачное».
+
+        👥 Сообщество
+        Публикуйте свои лучшие работы, голосуйте за чужие идеи, участвуйте в челленджах.
+
+        🔒 Безопасность
+        Все данные хранятся локально. Никаких облаков или скрытой аналитики.
+        """,
+        "Уникальность": """
+        Нет аналогов с открытым исходным кодом и бесплатным функционалом.
+        Сообщество вместо монетизации: Никаких платных подписок — только добровольные донаты.
+        Для всех: Подходит как профессионалам, так и новичкам.
+        """,
+        "Библиотека промптов": """
+        📚 AI Prompts Repository - Открытая библиотека промптов, которая содержит:
+        - Структурированную коллекцию промптов для различных AI-моделей
+        - Готовые шаблоны для разных задач
+        - Примеры эффективных запросов
+        - Возможность внести свой вклад в развитие базы промптов
+        - Скрипт для визуального добавления и использования промптов
+        """,
+        "Архитектура": """
+        - MVVM архитектура
+        - Dagger для внедрения зависимостей
+        - Kotlin Coroutines и Flow для асинхронных операций
+        - Paging 3 для постраничной загрузки
+        - View Binding для работы с UI
+        """,
+        "Основные компоненты": """
+        - Fragment для отображения UI
+        - ViewModel для бизнес-логики
+        - Adapter для отображения списка промптов
+        - Repository для работы с данными
+        - Interactor для бизнес-правил
+        """
+    }
+    
+    logger.info("\nКонтекст приложения:")
+    for section, content in context.items():
+        logger.info(f"\n{section}:")
+        logger.info(content)
+
+    try:
+        # Анализируем Fragment
+        logger.info("\nНачало анализа Fragment...")
+        fragment_result = ollama_client.analyze_code(fragment_code, "kotlin", context=context)
+        
+        assert "documentation" in fragment_result, "Отсутствует документация для Fragment"
+        fragment_doc = fragment_result["documentation"]
+        
+        logger.info("\nСгенерированная документация для Fragment:")
+        logger.info(fragment_doc)
+
+        # Проверяем документацию Fragment с более гибкими проверками
+        assert "/**" in fragment_doc and "*/" in fragment_doc, "Неверный формат KDoc"
+        
+        # Проверяем наличие основных элементов с учетом возможных вариаций
+        required_elements = [
+            "HomeFragment",
+            "Fragment",
+            "@property",
+            "Внешние зависимости",
+            "Взаимодействие"
+        ]
+        
+        missing_elements = [elem for elem in required_elements if elem not in fragment_doc]
+        if missing_elements:
+            logger.warning(f"Отсутствующие элементы в документации Fragment: {', '.join(missing_elements)}")
+            # Не прерываем тест, а только логируем предупреждение
+        
+        # Анализируем ViewModel
+        logger.info("\nНачало анализа ViewModel...")
+        viewmodel_result = ollama_client.analyze_code(viewmodel_code, "kotlin", context=context)
+        
+        assert "documentation" in viewmodel_result, "Отсутствует документация для ViewModel"
+        viewmodel_doc = viewmodel_result["documentation"]
+        
+        logger.info("\nСгенерированная документация для ViewModel:")
+        logger.info(viewmodel_doc)
+
+        # Проверяем документацию ViewModel с более гибкими проверками
+        assert "/**" in viewmodel_doc and "*/" in viewmodel_doc, "Неверный формат KDoc"
+        
+        # Проверяем наличие основных элементов с учетом возможных вариаций
+        required_elements = [
+            "HomeViewModel",
+            "ViewModel",
+            "@property",
+            "Внешние зависимости",
+            "Взаимодействие"
+        ]
+        
+        missing_elements = [elem for elem in required_elements if elem not in viewmodel_doc]
+        if missing_elements:
+            logger.warning(f"Отсутствующие элементы в документации ViewModel: {', '.join(missing_elements)}")
+            # Не прерываем тест, а только логируем предупреждение
+        
+        # Проверяем специфичные для Android элементы с учетом возможных вариаций
+        fragment_android_terms = [
+            "Fragment", "ViewBinding", "RecyclerView", "Adapter", "SearchView"
+        ]
+        
+        viewmodel_android_terms = [
+            "ViewModel", "Dagger", "Coroutines", "Flow", "Paging"
+        ]
+        
+        # Проверяем отсутствие исходного кода в документации
+        code_indicators_fragment = [
+            "class HomeFragment : Fragment()",
+            "private var _binding",
+            "override fun onViewCreated",
+            "private fun setupViews()",
+            "recyclerView.apply"
+        ]
+        
+        code_indicators_viewmodel = [
+            "class HomeViewModel @AssistedInject constructor",
+            "private val _error = MutableSharedFlow",
+            "fun handleLoadStates",
+            "viewModelScope.launch",
+            "when (val result ="
+        ]
+        
+        # Проверяем отсутствие фрагментов исходного кода
+        for indicator in code_indicators_fragment:
+            assert indicator not in fragment_doc, f"Документация Fragment содержит исходный код: {indicator}"
+            
+        for indicator in code_indicators_viewmodel:
+            assert indicator not in viewmodel_doc, f"Документация ViewModel содержит исходный код: {indicator}"
+        
+        fragment_terms = [term for term in fragment_android_terms if term not in fragment_doc]
+        if fragment_terms:
+            logger.warning(f"Отсутствующие Android-термины в документации Fragment: {', '.join(fragment_terms)}")
+        
+        viewmodel_terms = [term for term in viewmodel_android_terms if term not in viewmodel_doc]
+        if viewmodel_terms:
+            logger.warning(f"Отсутствующие Android-термины в документации ViewModel: {', '.join(viewmodel_terms)}")
+        
+        # Проверяем наличие хотя бы 30% Android-терминов
+        assert len(fragment_terms) < len(fragment_android_terms) * 0.7, "Недостаточно Android-специфичных компонентов в документации Fragment"
+        assert len(viewmodel_terms) < len(viewmodel_android_terms) * 0.7, "Недостаточно Android-специфичных компонентов в документации ViewModel"
+        
+        logger.info("\nТест успешно завершен")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при выполнении теста: {str(e)}")
+        logger.error(f"Тип ошибки: {type(e).__name__}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise

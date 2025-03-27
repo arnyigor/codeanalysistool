@@ -82,7 +82,7 @@ class OllamaClient:
 
             # Форматируем размер модели
             size_bytes = int(model_info.get('size', 0))
-            size_gb = size_bytes / (1024 * 1024 * 1024)
+            self.size_gb = size_bytes / (1024 * 1024 * 1024)
 
             # Получаем размер контекста
             model_params = model_details.get('model_info', {})
@@ -102,7 +102,7 @@ class OllamaClient:
             # Логируем основную информацию о модели
             logging.info("Используется модель Ollama:")
             logging.info(f"- Название: {self.model}")
-            logging.info(f"- Размер модели: {size_gb:.2f} GB")
+            logging.info(f"- Размер модели: {self.size_gb:.2f} GB")
             logging.info(f"- Размер контекста: {self.context_length} токенов")
 
             # Сохраняем структуру
