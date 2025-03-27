@@ -8,6 +8,55 @@ from typing import Dict, Optional
 
 import ollama
 
+LOG_FILE = os.path.abspath("ollama_client.log")
+
+def setup_logging():
+    """Настройка логгера для тестов"""
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+
+    # Форматтер для файла
+    file_formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # Очистка файла перед запуском
+    with open(LOG_FILE, 'w', encoding='utf-8') as f:
+        f.write("")
+
+    file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+    # Цветной форматтер для консоли
+    class ColoredFormatter(logging.Formatter):
+        """Форматтер с цветным выводом для разных уровней логирования"""
+        COLORS = {
+            'DEBUG': '\033[37m',  # Серый
+            'INFO': '\033[32m',   # Зеленый
+            'WARNING': '\033[33m', # Желтый
+            'ERROR': '\033[31m',   # Красный
+            'CRITICAL': '\033[41m' # Красный фон
+        }
+        RESET = '\033[0m'
+
+        def format(self, record):
+            color = self.COLORS.get(record.levelname, self.RESET)
+            record.levelname_colored = f"{color}{record.levelname:<8}{self.RESET}"
+            return super().format(record)
+
+    console_handler = logging.StreamHandler()
+    console_formatter = ColoredFormatter(
+        '%(levelname_colored)s | %(message)s'
+    )
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+
+# Настройка логгирования перед тестами
+setup_logging()
+
 
 class OllamaClient:
     def __init__(self):
@@ -15,13 +64,6 @@ class OllamaClient:
         Инициализация клиента Ollama.
         Использует первую доступную запущенную модель.
         """
-        # Настраиваем логирование
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-
         try:
             models = ollama.list()
             available_models = models.get('models', [])
@@ -100,13 +142,25 @@ class OllamaClient:
         # Оцениваем размер системного промпта с контекстом
         system_tokens = BASE_SYSTEM_PROMPT_SIZE
         context_size = 0
+        
+        # Обработка контекста
         if context:
-            context_size = sum(
-                len(str(content).encode()) // 3 
-                for content in context.values() 
+            valid_context = {
+                title: content.strip() 
+                for title, content in context.items() 
                 if content is not None and content.strip()
-            )
-            system_tokens += context_size
+            }
+            if valid_context:
+                # Добавляем токены на заголовки и форматирование
+                context_size = sum(len(str(content).encode()) // 3 for content in valid_context.values())
+                context_size += len(valid_context) * 20  # ~20 токенов на заголовки и форматирование
+                system_tokens += context_size
+                
+                # Логируем информацию о контексте
+                logging.info("\nКонтекст:")
+                for title, content in valid_context.items():
+                    preview = content[:50] + "..." if len(content) > 50 else content
+                    logging.info(f"- {title}:\n{preview}")
         
         # Общий размер входных данных
         total_input_tokens = code_tokens + template_tokens + system_tokens
@@ -123,14 +177,16 @@ class OllamaClient:
         # Вычисляем оптимальный размер контекста
         OPTIMAL_CONTEXT = min(base_context + buffer_size, max_safe_context)
 
-        # Оцениваем размер документации (примерно 1/3 от размера кода + доп. токены для контекста)
-        doc_tokens = max(200, min(code_tokens // 3 + (context_size // 4), 2000))
+        # Оцениваем размер документации
+        doc_tokens = self._estimate_doc_size(code)
+        if context_size > 0:
+            doc_tokens = int(doc_tokens * 1.5)  # Увеличиваем размер для контекстной документации
 
         # Устанавливаем параметры
         params = {
-            "temperature": 0.2,  # Более низкая температура для более предсказуемой документации
+            "temperature": 0.2,
             "top_p": 0.7,
-            "num_tokens": doc_tokens + 200,  # Базовый размер + небольшой буфер
+            "num_tokens": doc_tokens + 200,  # Базовый размер + буфер
             "context_length": OPTIMAL_CONTEXT
         }
 
@@ -154,6 +210,28 @@ class OllamaClient:
 
         return params
 
+    def _log_model_response(self, response: Dict, elapsed_time: float, metrics: Dict):
+        """Логирует информацию о работе модели после запроса."""
+        logging.info("\nИнформация о выполнении запроса:")
+        
+        # Логируем метрики
+        logging.info(f"- Общее время: {elapsed_time:.2f} сек")
+        logging.info(f"- Токены промпта: {metrics['prompt_tokens']}")
+        logging.info(f"- Токены ответа: {metrics['completion_tokens']}")
+        logging.info(f"- Всего токенов: {metrics['tokens']}")
+        logging.info(f"- Скорость: {metrics['speed']:.2f} токенов/сек")
+        logging.info(f"- Среднее время на токен: {(elapsed_time * 1000) / metrics['tokens']:.2f} мс")
+        
+        # Информация о памяти
+        if 'memory' in response:
+            memory = response['memory']
+            if isinstance(memory, dict):
+                logging.info("\nИспользование памяти:")
+                for key, value in memory.items():
+                    if isinstance(value, (int, float)):
+                        value_mb = value / (1024 * 1024)  # Конвертируем в МБ
+                        logging.info(f"- {key}: {value_mb:.2f} МБ")
+
     def analyze_code(self, code: str, file_type: str, context: Optional[Dict[str, str]] = None) -> Optional[dict]:
         """Анализирует код и генерирует документацию."""
         # Проверяем тип файла
@@ -173,9 +251,14 @@ class OllamaClient:
 
             # Добавляем контекстную информацию если она есть
             if context:
-                system_prompt += "=== Контекстная информация ===\n"
-                for title, content in context.items():
-                    if content is not None and content.strip():
+                valid_context = {
+                    title: content.strip() 
+                    for title, content in context.items() 
+                    if content is not None and content.strip()
+                }
+                if valid_context:
+                    system_prompt += "=== Контекстная информация ===\n"
+                    for title, content in valid_context.items():
                         system_prompt += f"\n--- {title} ---\n{content}\n\n"
 
             # Добавляем основной системный промпт
@@ -192,7 +275,9 @@ class OllamaClient:
 1. Учитывайте связи между компонентами
 2. Отражайте зависимости в документации
 3. Используйте информацию о реализации
-4. Добавляйте ссылки на связанные классы"""
+4. Добавляйте ссылки на связанные классы
+5. Включайте информацию о взаимодействии с другими компонентами
+6. Описывайте особенности реализации из контекста"""
 
             # Создаем промпт с кодом и контекстом
             prompt = self._create_documentation_prompt(code, file_type, context)
@@ -210,16 +295,31 @@ class OllamaClient:
                 system=system_prompt,
                 options=model_params
             )
-
-            # Получаем метрики
             elapsed_time = time.time() - start_time
-            total_tokens = response.get('total_tokens', 0)
+
+            # Получаем метрики из ответа
+            context = response.get('context', [])
+            prompt_eval_count = len(context) if isinstance(context, list) else 0
+            eval_count = response.get('eval_count', 0)
+            
+            # Вычисляем токены
+            completion_tokens = eval_count - prompt_eval_count if eval_count > prompt_eval_count else 0
+            total_tokens = prompt_eval_count + completion_tokens
+            
+            # Скорость обработки
             tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
 
-            # Вычисляем размер контекста
-            context_size = 0
-            if context:
-                context_size = sum(len(content.encode()) // 3 for content in context.values() if content is not None and content.strip())
+            # Формируем метрики
+            metrics = {
+                "time": round(elapsed_time, 2),
+                "tokens": total_tokens,
+                "prompt_tokens": prompt_eval_count,
+                "completion_tokens": completion_tokens,
+                "speed": round(tokens_per_second, 2)
+            }
+
+            # Логируем информацию о работе модели
+            self._log_model_response(response, elapsed_time, metrics)
 
             # Получаем документацию из ответа
             documentation = response.get('response', '').strip()
@@ -236,12 +336,7 @@ class OllamaClient:
             result = {
                 "documentation": documentation,
                 "status": "success",
-                "metrics": {
-                    "time": round(elapsed_time, 2),
-                    "tokens": total_tokens,
-                    "speed": round(tokens_per_second, 2),
-                    "context_size": context_size
-                }
+                "metrics": metrics
             }
 
             return result
