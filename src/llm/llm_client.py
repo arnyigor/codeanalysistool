@@ -324,7 +324,7 @@ class OllamaClient:
             # Получаем документацию из ответа
             documentation = response.get('response', '').strip()
 
-            # Проверяем наличие документации
+                # Проверяем наличие документации
             if not documentation or not "/**" in documentation:
                 documentation = self._create_empty_java_doc(code)
                 logging.warning("Модель вернула некорректный ответ, создана базовая документация")
@@ -335,7 +335,7 @@ class OllamaClient:
             # Формируем результат
             result = {
                 "documentation": documentation,
-                "status": "success",
+                    "status": "success",
                 "metrics": metrics
             }
 
