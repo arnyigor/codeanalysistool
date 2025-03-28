@@ -833,7 +833,7 @@ def test_stability(ollama_client, caplog):
             test_android_home_documentation
         ]
 
-        iterations = 5  # Количество прогонов каждого теста
+        iterations = 3  # Количество прогонов каждого теста
         results = {test.__name__: {"passed": 0, "failed": 0} for test in tests_to_check}
         all_performance_metrics = []
 

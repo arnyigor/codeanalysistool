@@ -70,11 +70,8 @@ class OllamaClient:
             if not available_models:
                 raise RuntimeError("Нет запущенных моделей Ollama")
 
-            # Проверяем наличие обязательных полей
-            selected_params_count = '7b'
+            selected_params_count = '3b'
             ollama_model = self.select_model(available_models, selected_params_count)
-
-            model_name = ollama_model['model']
             if 'model' not in ollama_model:
                 raise ValueError("Некорректный формат данных модели: отсутствует поле 'name'")
 
@@ -139,7 +136,6 @@ class OllamaClient:
                     return model
         raise ValueError(f"Модель с параметрами {params_count} не найдена. Доступные модели: " + ", ".join(
             [model['model'] for model in models]))
-
 
     def get_value_by_key(self, model_info, key):
         if isinstance(model_info, dict):
@@ -218,14 +214,10 @@ class OllamaClient:
         params = {
             "temperature": 0.3,
             "top_p": 0.8,
-            "num_predict": doc_tokens + 200,  # Базовый размер + буфер
-            "context_length": OPTIMAL_CONTEXT,
-            "num_gpu": 0,  # Явно указываем использование CPU
-            "num_thread": 12,  # Используем все доступные потоки
-            "repeat_last_n": 64,  # Уменьшаем для экономии памяти
-            "repeat_penalty": 1.1,  # Немного увеличиваем для лучшей производительности
-            "num_ctx": OPTIMAL_CONTEXT,  # Явно задаем размер контекста
-            "stop": ["```", "---", "###"]  # Стоп-токены для предотвращения генерации лишнего
+            "num_predict": doc_tokens + 200,
+            "num_gpu": 0,
+            "num_thread": 12,
+            "num_ctx": OPTIMAL_CONTEXT,
         }
 
         # Логируем параметры
