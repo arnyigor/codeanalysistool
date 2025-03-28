@@ -216,7 +216,7 @@ class OllamaClient:
             "top_p": 0.8,
             "num_predict": doc_tokens + 200,
             "num_gpu": 0,
-            "num_thread": 12,
+            "num_thread": 8,
             "num_ctx": OPTIMAL_CONTEXT,
         }
 

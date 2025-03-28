@@ -1,551 +1,365 @@
-import json
 import logging
 import os
+import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Any
 
 from src.llm.llm_client import OllamaClient
-from .doc_analyzer import DocAnalyzer
+
 
 class CodeAnalyzer:
-    """
-    Анализатор кода с использованием LLM для генерации документации
-    и последующим анализом сгенерированной документации.
-    """
-
-    def __init__(self, cache_dir: str = ".cache"):
+    """Анализатор кода для документирования файлов и проектов."""
+    
+    def __init__(self, model_client: Optional[OllamaClient] = None, cache_dir: str = '.cache'):
         """
-        Инициализация анализатора кода.
+        Инициализирует анализатор кода.
         
         Args:
-            cache_dir (str): Директория для кэширования результатов
+            model_client: Клиент для взаимодействия с языковой моделью.
+                          Если не указан, будет создан новый экземпляр.
+            cache_dir: Директория для кэширования результатов анализа.
         """
+        self.client = model_client or OllamaClient()
+        self.supported_extensions = {
+            '.kt': 'kotlin',
+            '.java': 'java',
+            # Дополнительные типы файлов могут быть добавлены здесь
+        }
         self.cache_dir = cache_dir
+        self.analysis_results = {}
         
-        # Создаем директорию для кэша если её нет
-        if not os.path.exists(cache_dir):
-            os.makedirs(cache_dir)
-            
-        self.analyzed_files = {}
-        self.relationships = {}
+        # Создаем директории для кэша если их нет
+        os.makedirs(os.path.join(cache_dir, 'docs'), exist_ok=True)
+        os.makedirs(os.path.join(cache_dir, 'test_results'), exist_ok=True)
         
-        # Инициализация клиентов
-        self.llm_client = OllamaClient()
-        self.doc_analyzer = DocAnalyzer()
-        
-        logging.info("Инициализация CodeAnalyzer завершена")
-
-    def analyze_directory(self, directory: str) -> List[Dict]:
+        logging.info("Инициализирован анализатор кода")
+    
+    def analyze_path(self, path: str, recursive: bool = True, 
+                     output_dir: Optional[str] = None) -> Dict[str, Dict]:
         """
-        Анализирует директорию с кодом.
+        Анализирует все поддерживаемые файлы по указанному пути.
         
         Args:
-            directory (str): Путь к директории с кодом
-            
-        Returns:
-            List[Dict]: Список результатов анализа для каждого файла
-        """
-        results = []
+            path: Путь к файлу или директории для анализа
+            recursive: Анализировать ли вложенные директории
+            output_dir: Директория для сохранения результатов.
+                        Если не указана, результаты не сохраняются.
         
-        for root, _, files in os.walk(directory):
-            for file in files:
-                if file.endswith(('.kt', '.java')):
-                    file_path = os.path.join(root, file)
-                    try:
-                        result = self.process_file(file_path)
-                        if result:
-                            results.append(result)
-                    except Exception as e:
-                        logging.error(f"Ошибка при обработке файла {file_path}: {str(e)}")
-                        
+        Returns:
+            Словарь с результатами анализа, где ключи - пути к файлам
+        """
+        path_obj = Path(path)
+        results = {}
+        
+        if path_obj.is_file():
+            # Обрабатываем один файл
+            result = self.analyze_file(str(path_obj))
+            if result:
+                results[str(path_obj)] = result
+                if output_dir:
+                    self._save_result(str(path_obj), result, output_dir)
+        
+        elif path_obj.is_dir():
+            # Обрабатываем директорию
+            for file_path in self._find_files(path_obj, recursive):
+                logging.info(f"Анализ файла: {file_path}")
+                result = self.analyze_file(str(file_path))
+                if result:
+                    results[str(file_path)] = result
+                    if output_dir:
+                        self._save_result(str(file_path), result, output_dir)
+        else:
+            logging.error(f"Путь не существует: {path}")
+        
+        # Сохраняем результаты для метода generate_documentation
+        self.analysis_results.update(results)
+        
         return results
-
-    def process_file(self, file_path: str) -> Optional[Dict]:
+    
+    def analyze_directory(self, directory_path: str) -> Dict[str, Any]:
         """
-        Обрабатывает один файл.
+        Анализирует директорию и подготавливает результаты для документации.
+        Метод используется в main.py.
         
         Args:
-            file_path (str): Путь к файлу
+            directory_path: Путь к директории с исходным кодом
             
         Returns:
-            Optional[Dict]: Результат анализа файла или None в случае ошибки
+            Словарь с результатами анализа
         """
-        file_type = 'kotlin' if file_path.endswith('.kt') else 'java'
-        cache_file = os.path.join(self.cache_dir, os.path.basename(file_path) + '.json')
+        logging.info(f"Начинаем анализ директории: {directory_path}")
         
-        # Проверяем кэш
-        if os.path.exists(cache_file):
-            try:
-                with open(cache_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logging.warning(f"Ошибка чтения кэша для {file_path}: {str(e)}")
+        # Используем метод analyze_path для анализа директории
+        results = self.analyze_path(directory_path, recursive=True)
         
-        try:
-            # Читаем файл
-            with open(file_path, 'r', encoding='utf-8') as f:
-                code = f.read()
-                
-            logging.info(f"Начало обработки файла: {file_path}")
-            
-            # Шаг 1: Генерация документированной версии кода
-            doc_result = self.llm_client.analyze_code(code, file_type)
-            if doc_result.get('error'):
-                logging.error(f"Ошибка при генерации документации: {doc_result['error']}")
-                return None
-                
-            documented_code = doc_result['documented_code']
-            
-            # Шаг 2: Анализ документированного кода
-            analysis_result = self.doc_analyzer.analyze_file(documented_code, file_type)
-            if analysis_result.get('error'):
-                logging.error(f"Ошибка при анализе документации: {analysis_result['error']}")
-                return None
-                
-            # Добавляем информацию о модели
-            result = {
-                'file_path': file_path,
-                'analysis': analysis_result,
-                'model_info': doc_result['model_info']
-            }
-            
-            # Сохраняем в кэш
-            try:
-                with open(cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, ensure_ascii=False, indent=2)
-                logging.info(f"Результаты сохранены в кэш: {cache_file}")
-            except Exception as e:
-                logging.warning(f"Ошибка сохранения в кэш для {file_path}: {str(e)}")
-                
-            return result
-            
-        except Exception as e:
-            logging.error(f"Ошибка при обработке файла {file_path}: {str(e)}")
-            return None
-
-    def analyze_file(self, file_path: str) -> Optional[Dict]:
+        # Выводим статистику
+        success_count = sum(1 for r in results.values() if r.get('status') == 'success')
+        error_count = len(results) - success_count
+        
+        logging.info(f"Анализ директории завершен: {directory_path}")
+        logging.info(f"Всего файлов: {len(results)}")
+        logging.info(f"Успешно: {success_count}")
+        logging.info(f"С ошибками: {error_count}")
+        
+        # Возвращаем результаты
+        return results
+    
+    def generate_documentation(self, output_file: str) -> None:
         """
-        Анализирует файл и возвращает результат анализа.
+        Генерирует документацию на основе результатов анализа.
+        Метод используется в main.py.
+        
+        Args:
+            output_file: Путь к файлу для сохранения документации
+        """
+        if not self.analysis_results:
+            logging.warning("Нет результатов анализа для генерации документации")
+            return
+        
+        logging.info(f"Генерация документации в файл: {output_file}")
+        
+        # Создаем директорию для выходного файла, если её нет
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        
+        # Формируем содержимое документации
+        output_content = "# Документация проекта\n\n"
+        
+        # Добавляем информацию о проанализированных файлах
+        output_content += "## Проанализированные файлы\n\n"
+        
+        for file_path, result in self.analysis_results.items():
+            file_name = os.path.basename(file_path)
+            status = result.get('status', 'error')
+            status_icon = "✅" if status == 'success' else "❌"
+            
+            output_content += f"- {status_icon} {file_name}\n"
+        
+        output_content += "\n## Документация классов\n\n"
+        
+        # Добавляем документацию для каждого файла
+        for file_path, result in self.analysis_results.items():
+            if result.get('status') == 'success' and 'documentation' in result:
+                file_name = os.path.basename(file_path)
+                
+                output_content += f"### {file_name}\n\n"
+                output_content += "```kotlin\n"
+                output_content += result['documentation']
+                output_content += "\n```\n\n"
+        
+        # Сохраняем документацию в файл
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(output_content)
+        
+        logging.info(f"Документация успешно сгенерирована: {output_file}")
+    
+    def analyze_file(self, file_path: str, context_files: List[str] = None) -> Optional[Dict]:
+        """
+        Анализирует отдельный файл и генерирует документацию.
         
         Args:
             file_path: Путь к файлу для анализа
-            
-        Returns:
-            Optional[Dict]: Результат анализа или None в случае ошибки
-        """
-        try:
-            # Проверяем кэш
-            cache_key = self._get_cache_key(file_path)
-            if cache_key in self.analyzed_files:
-                logging.info(f"Используем кэшированный результат для {file_path}")
-                return self.analyzed_files[cache_key]
-
-            # Определяем тип файла
-            file_type = self._get_file_type(file_path)
-            if not file_type:
-                logging.warning(f"Неподдерживаемый тип файла: {file_path}")
-                return None
-
-            # Читаем содержимое файла
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-            except Exception as e:
-                logging.error(f"Ошибка при чтении файла {file_path}: {str(e)}")
-                return None
-
-            if not content.strip():
-                logging.warning(f"Файл пуст: {file_path}")
-                return None
-
-            # Анализируем код
-            try:
-                result = self.llm_client.analyze_code(content, file_type)
-
-                # Проверяем структуру результата
-                if not isinstance(result, dict):
-                    raise ValueError(f"Неожиданный формат результата: {type(result)}")
-
-                required_fields = ['description', 'components']
-                missing_fields = [field for field in required_fields if field not in result]
-                if missing_fields:
-                    raise ValueError(
-                        f"В результате отсутствуют обязательные поля: {missing_fields}")
-
-                # Сохраняем результат в кэш
-                self.analyzed_files[cache_key] = result
-                logging.info(f"Успешно проанализирован файл: {file_path}")
-                return result
-
-            except Exception as e:
-                logging.error(f"Ошибка при анализе файла {file_path}: {str(e)}")
-                return None
-
-        except Exception as e:
-            logging.error(f"Неожиданная ошибка при обработке файла {file_path}: {str(e)}")
-            return None
-
-    def _process_kotlin_file(self, file_path: str, content: str) -> Dict:
-        """Обработка Kotlin файла"""
-        logging.info(f"Анализ Kotlin файла: {file_path}")
-
-        try:
-            result = self.llm_client.analyze_code(content, 'kotlin')
-
-            # Обновляем взаимосвязи
-            for class_info in result.get('classes', []):
-                self._update_relationships(class_info)
-
-            return result
-
-        except Exception as e:
-            logging.error(f"Ошибка анализа Kotlin файла {file_path}: {str(e)}")
-            return {'error': str(e)}
-
-    def _process_java_file(self, file_path: str, content: str) -> Dict:
-        """Обработка Java файла"""
-        logging.info(f"Анализ Java файла: {file_path}")
-
-        try:
-            result = self.llm_client.analyze_code(content, 'java')
-
-            # Обновляем взаимосвязи
-            for class_info in result.get('classes', []):
-                self._update_relationships(class_info)
-
-            return result
-
-        except Exception as e:
-            logging.error(f"Ошибка анализа Java файла {file_path}: {str(e)}")
-            return {'error': str(e)}
-
-    def _process_xml_file(self, file_path: str, content: str) -> Dict:
-        """Обработка Android XML файла"""
-        logging.info(f"Анализ XML файла: {file_path}")
-
-        xml_type = self._determine_xml_type(file_path)
-
-        prompt = """[СИСТЕМНЫЕ ТРЕБОВАНИЯ]
-Вы - опытный разработчик Android, специализирующийся на UI/UX. Ваша задача - проанализировать XML файл и создать подробную документацию.
-
-[ПРАВИЛА АНАЛИЗА]
-1. Определять назначение и структуру макета
-2. Выявлять UI компоненты и их взаимосвязи
-
-[ФОРМАТ ДОКУМЕНТАЦИИ]
-- Писать на русском языке
-- Давать исчерпывающие описания
-- Указывать все ресурсные зависимости
-- Документировать особенности верстки
-
-[ТРЕБУЕМЫЙ АНАЛИЗ]
-Проанализируйте следующий Android XML файл ({xml_type}):
-```xml
-{code}
-```
-
-[СТРУКТУРА ОТВЕТА]
-Предоставьте результат в формате JSON:
-{{
-    "type": "{xml_type}",
-    "purpose": "подробное описание назначения файла",
-    "layout_type": "ConstraintLayout/LinearLayout/etc",
-    "components": [
-        {{
-            "type": "тип компонента",
-            "id": "идентификатор",
-            "purpose": "назначение компонента",
-            "accessibility": {{
-                "content_description": "описание для TalkBack",
-                "importance": "важность для скринридеров",
-                "issues": ["проблемы доступности"]
-            }},
-            "layout_params": {{
-                "width": "wrap_content/match_parent/dimension",
-                "height": "wrap_content/match_parent/dimension",
-                "constraints": ["описание ограничений"],
-                "margins": ["отступы"],
-                "padding": ["внутренние отступы"]
-            }},
-            "style": {{
-                "theme": "используемая тема",
-                "custom_attributes": ["пользовательские атрибуты"],
-                "material_components": true/false
-            }}
-        }}
-    ],
-    "resource_references": [
-        {{
-            "type": "тип ресурса (string/color/dimen/etc)",
-            "name": "имя ресурса",
-            "usage": "где используется"
-        }}
-    ],
-    "custom_attributes": [
-        {{
-            "name": "имя атрибута",
-            "purpose": "назначение",
-            "type": "тип значения",
-            "default_value": "значение по умолчанию"
-        }}
-    ],
-    "layout_analysis": {{
-        "depth": "глубина вложенности",
-        "performance_issues": ["потенциальные проблемы производительности"],
-        "accessibility_score": "оценка доступности (1-5)",
-        "material_design_compliance": ["отклонения от Material Design"],
-        "recommendations": ["рекомендации по улучшению"]
-    }}
-}}"""
-
-        try:
-            result = self.llm_client.analyze_code(content, 'xml')
-            return result
-
-        except Exception as e:
-            logging.error(f"Ошибка анализа XML файла {file_path}: {str(e)}")
-            return {'error': str(e)}
-
-    def _determine_xml_type(self, file_path: str) -> str:
-        """Определение типа Android XML файла"""
-        path = Path(file_path)
-        if 'layout' in str(path):
-            return 'layout'
-        elif 'menu' in str(path):
-            return 'menu'
-        elif 'values' in str(path):
-            return 'values'
-        else:
-            return 'unknown'
-
-    def generate_documentation(self, output_file: str):
-        """Генерация окончательной документации в формате README"""
-        # Подготовка разделов
-        sections = {
-            'overview': self._generate_overview(),
-            'components': self._generate_components_section(),
-            'relationships': self._generate_relationships_section(),
-            'layouts': self._generate_layouts_section()
-        }
-
-        # Генерация markdown
-        markdown = f"""# Документация проекта
-
-## Содержание
-- [Обзор проекта](#обзор-проекта)
-- [Компоненты](#компоненты)
-- [Взаимосвязи](#взаимосвязи)
-- [Макеты](#макеты)
-
-## Обзор проекта
-{sections['overview']}
-
-## Компоненты
-{sections['components']}
-
-## Взаимосвязи
-{sections['relationships']}
-
-## Макеты
-{sections['layouts']}
-"""
-
-        # Создаем директорию для документации, если она не существует
-        output_path = Path(output_file)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Сохранение в файл с явным указанием кодировки
-        output_path.write_text(markdown, encoding='utf-8')
-        logging.info(f"Документация сгенерирована в {output_file}")
-
-    def _generate_overview(self) -> str:
-        """Генерация раздела общего обзора проекта"""
-        components = [info for info in self.analyzed_files.values() if 'classes' in info]
-        android_components = sum(
-            1 for comp in components
-            for cls in comp['classes']
-            if cls.get('is_android_component', False)
-        )
-
-        return f"""Проект содержит:
-- {len(components)} исходных файлов
-- {android_components} Android-компонентов
-- {len(self.relationships)} взаимосвязей между классами"""
-
-    def _generate_components_section(self) -> str:
-        """Генерация раздела документации компонентов"""
-        sections = []
-
-        for file_info in self.analyzed_files.values():
-            if 'classes' not in file_info:
-                continue
-
-            for cls in file_info['classes']:
-                # Генерация KDoc/JavaDoc для класса
-                doc_comment = self._generate_doc_comment(cls)
-
-                sections.append(f"""### {cls['name']}
-{cls['purpose']}
-
-**Тип:** {'Android-компонент' if cls['is_android_component'] else 'Обычный класс'}
-**Родительские классы:** {', '.join(cls['superclasses'])}
-
-#### Методы:
-{self._format_methods(cls['methods'])}
-
-#### Зависимости:
-{', '.join(cls['dependencies'])}
-
-#### Сгенерированная документация:
-```kotlin
-{doc_comment}
-```
-""")
-
-        return '\n'.join(sections)
-
-    def _generate_relationships_section(self) -> str:
-        """Генерация раздела документации взаимосвязей"""
-        sections = []
-
-        for class_name, relations in self.relationships.items():
-            sections.append(f"""### {class_name}
-- **Наследует:** {', '.join(relations['superclasses']) or 'нет'}
-- **Зависит от:** {', '.join(relations['dependencies']) or 'нет'}
-""")
-
-        return '\n'.join(sections)
-
-    def _generate_layouts_section(self) -> str:
-        """Генерация раздела документации макетов"""
-        sections = []
-
-        for file_info in self.analyzed_files.values():
-            if file_info.get('type') != 'layout':
-                continue
-
-            sections.append(f"""### {file_info['purpose']}
-
-#### Компоненты:
-{self._format_components(file_info['components'])}
-
-#### Используемые ресурсы:
-{', '.join(file_info['resource_references']) or 'нет'}
-""")
-
-        return '\n'.join(sections)
-
-    def _generate_doc_comment(self, cls: Dict) -> str:
-        """Генерирует документационный комментарий для класса."""
-        purpose = cls.get('purpose', 'Требует описания')
-        doc_lines = [
-            '/**',
-            f' * {purpose}',
-            ' *'
-        ]
+            context_files: Список путей к файлам, содержащим контекстную информацию
         
-        # Добавляем информацию о родительских классах
-        if cls.get('superclasses'):
-            doc_lines.append(f' * Наследуется от: {", ".join(cls["superclasses"])}')
+        Returns:
+            Словарь с результатами анализа или None, если файл не поддерживается
+        """
+        path_obj = Path(file_path)
+        
+        # Проверяем поддержку типа файла
+        file_type = self._get_file_type(path_obj)
+        if not file_type:
+            logging.warning(f"Неподдерживаемый тип файла: {file_path}")
+            return None
+        
+        # Проверяем кэш
+        cache_path = self._get_cache_path(file_path, file_type)
+        cached_result = self._load_from_cache(cache_path)
+        
+        if cached_result:
+            logging.info(f"Результат загружен из кэша: {file_path}")
+            return cached_result
+        
+        try:
+            # Читаем содержимое файла
+            with open(file_path, 'r', encoding='utf-8') as f:
+                code = f.read()
             
-        # Добавляем информацию о зависимостях
-        if cls.get('dependencies'):
-            doc_lines.append(f' * Зависимости: {", ".join(cls["dependencies"])}')
+            # Если код пустой, пропускаем файл
+            if not code.strip():
+                logging.warning(f"Пустой файл: {file_path}")
+                return None
             
-        # Добавляем документацию методов
-        if cls.get('methods'):
-            for method in cls['methods']:
-                if method.get('parameters'):
-                    param_docs = []
-                    for p in method['parameters']:
-                        param_type = p.get('type', 'unknown')
-                        param_name = p.get('name', 'unknown')
-                        param_desc = p.get('purpose', 'Требует описания')
-                        param_docs.append(f' * @param {param_name} [{param_type}] {param_desc}')
-                    if param_docs:
-                        doc_lines.extend(param_docs)
-                        
-        doc_lines.append(' */')
-        return '\n'.join(doc_lines)
-
-    def _format_methods(self, methods: List[Dict]) -> str:
-        """Форматирование списка методов как markdown"""
-        formatted = []
-        for m in methods:
-            params = m.get('parameters', [])
-            returns = m.get('return', {})
-
-            # Преобразуем returns в словарь, если это строка
-            if isinstance(returns, str):
-                returns = {'type': 'Unit', 'description': returns}
-
-            # Форматируем параметры
-            param_str = ', '.join(f'{p["name"]}: {p["type"]}' for p in params)
-
-            # Форматируем описание
-            desc = [f"- `{m['name']}({param_str})`: {m['purpose']}"]
-
-            # Добавляем описания параметров
-            if params:
-                desc.append("  - Параметры:")
-                for p in params:
-                    desc.append(f"    - `{p['name']}` ({p['type']}): {p['description']}")
-
-            # Добавляем информацию о возвращаемом значении
-            if returns:
-                return_type = returns.get('type', 'Unit')
-                return_desc = returns.get('description', '')
-                desc.append(f"  - Возвращает: [{return_type}] {return_desc}")
-
-            formatted.append('\n'.join(desc))
-
-        return '\n\n'.join(formatted)
-
-    def _format_components(self, components: List[Dict]) -> str:
-        """Форматирование списка компонентов как markdown"""
-        return '\n'.join(
-            f"- `{c['type']}` (id: `{c['id']}`): {c['purpose']}"
-            for c in components
-        )
-
-    def _update_relationships(self, class_info: Dict):
-        """Обновление информации о взаимосвязях"""
-        class_name = class_info['name']
-        logging.info(f"Обновление связей для класса: {class_name}")
-
-        # Добавляем информацию о наследовании
-        if class_info.get('superclasses'):
-            logging.info(
-                f"Класс {class_name} наследуется от: {', '.join(class_info['superclasses'])}")
-
-        # Добавляем информацию о зависимостях
-        if class_info.get('dependencies'):
-            logging.info(
-                f"Класс {class_name} зависит от: {', '.join(class_info['dependencies'])}")
-
-        self.relationships[class_name] = {
-            'superclasses': class_info.get('superclasses', []),
-            'dependencies': class_info.get('dependencies', [])
-        }
-
-    def _get_file_type(self, file_path: str) -> str:
+            # Получаем контекст, если указаны контекстные файлы
+            context = self._get_context(context_files) if context_files else None
+            
+            # Анализируем код
+            result = self.client.analyze_code(code, file_type, context)
+            
+            # Обогащаем результат метаданными
+            if result and 'documentation' in result:
+                result['file_path'] = file_path
+                result['file_type'] = file_type
+                result['file_name'] = path_obj.name
+            
+            # Сохраняем результат в кэш
+            if result and 'documentation' in result:
+                self._save_to_cache(cache_path, result)
+            
+            return result
+        
+        except Exception as e:
+            logging.error(f"Ошибка при анализе файла {file_path}: {str(e)}", exc_info=True)
+            return {
+                "error": str(e),
+                "file_path": file_path,
+                "file_type": file_type,
+                "file_name": path_obj.name,
+                "status": "error"
+            }
+    
+    def _get_file_type(self, path: Path) -> Optional[str]:
         """
         Определяет тип файла по его расширению.
         
         Args:
-            file_path (str): Путь к файлу
+            path: Путь к файлу
+        
+        Returns:
+            Строковое представление типа файла или None, если тип не поддерживается
+        """
+        extension = path.suffix.lower()
+        return self.supported_extensions.get(extension)
+    
+    def _find_files(self, path: Path, recursive: bool) -> List[Path]:
+        """
+        Находит все поддерживаемые файлы в указанной директории.
+        
+        Args:
+            path: Путь к директории
+            recursive: Искать ли во вложенных директориях
+        
+        Returns:
+            Список путей к найденным файлам
+        """
+        result = []
+        
+        if recursive:
+            # Рекурсивный поиск
+            for ext in self.supported_extensions:
+                result.extend(path.glob(f"**/*{ext}"))
+        else:
+            # Только в текущей директории
+            for ext in self.supported_extensions:
+                result.extend(path.glob(f"*{ext}"))
+        
+        return result
+    
+    def _get_context(self, context_files: List[str]) -> Dict[str, str]:
+        """
+        Читает контекстные файлы и формирует словарь контекста.
+        
+        Args:
+            context_files: Список путей к контекстным файлам
+        
+        Returns:
+            Словарь контекста, где ключи - имена файлов, а значения - их содержимое
+        """
+        context = {}
+        
+        for file_path in context_files:
+            try:
+                path_obj = Path(file_path)
+                if path_obj.exists() and path_obj.is_file():
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        context[path_obj.name] = f.read()
+                else:
+                    logging.warning(f"Контекстный файл не найден: {file_path}")
+            except Exception as e:
+                logging.error(f"Ошибка при чтении контекстного файла {file_path}: {str(e)}")
+        
+        return context
+    
+    def _save_result(self, file_path: str, result: Dict, output_dir: str) -> None:
+        """
+        Сохраняет результат анализа в файл.
+        
+        Args:
+            file_path: Путь к исходному файлу
+            result: Результат анализа
+            output_dir: Директория для сохранения
+        """
+        try:
+            # Создаем директорию для результатов
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Формируем имя выходного файла
+            path_obj = Path(file_path)
+            output_file = Path(output_dir) / f"{path_obj.stem}_doc{path_obj.suffix}"
+            
+            # Сохраняем документацию
+            with open(output_file, 'w', encoding='utf-8') as f:
+                if 'documentation' in result:
+                    f.write(result['documentation'])
+                else:
+                    f.write(f"// Ошибка генерации документации: {result.get('error', 'Неизвестная ошибка')}")
+            
+            logging.info(f"Результат сохранен в файл: {output_file}")
+        
+        except Exception as e:
+            logging.error(f"Ошибка при сохранении результата для {file_path}: {str(e)}")
+    
+    def _get_cache_path(self, file_path: str, file_type: str) -> str:
+        """
+        Генерирует путь к кэш-файлу на основе хэша пути к файлу.
+        
+        Args:
+            file_path: Путь к исходному файлу
+            file_type: Тип файла
             
         Returns:
-            str: Тип файла ('kotlin' или 'java')
-            
-        Raises:
-            ValueError: Если расширение файла не поддерживается
+            Путь к файлу кэша
         """
-        extension = file_path.lower().split('.')[-1]
+        import hashlib
         
-        if extension == 'kt':
-            return 'kotlin'
-        elif extension == 'java':
-            return 'java'
-        else:
-            raise ValueError(f"Неподдерживаемое расширение файла: .{extension}")
+        # Создаем хэш пути к файлу
+        file_hash = hashlib.md5(file_path.encode()).hexdigest()
+        
+        # Возвращаем путь к файлу кэша
+        return os.path.join(self.cache_dir, 'docs', f"{file_hash}_{file_type}.json")
+    
+    def _save_to_cache(self, cache_path: str, result: dict) -> None:
+        """
+        Сохраняет результат в кэш.
+        
+        Args:
+            cache_path: Путь к файлу кэша
+            result: Результат анализа
+        """
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+            logging.info(f"Результат сохранен в кэш: {cache_path}")
+        except Exception as e:
+            logging.warning(f"Не удалось сохранить кэш: {str(e)}")
+    
+    def _load_from_cache(self, cache_path: str) -> Optional[dict]:
+        """
+        Загружает результат из кэша.
+        
+        Args:
+            cache_path: Путь к файлу кэша
+            
+        Returns:
+            Результат анализа или None, если кэш не найден
+        """
+        try:
+            if os.path.exists(cache_path):
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    result = json.load(f)
+                    logging.info(f"Результат загружен из кэша: {cache_path}")
+                    return result
+        except Exception as e:
+            logging.warning(f"Не удалось загрузить кэш: {str(e)}")
+        
+        return None 
