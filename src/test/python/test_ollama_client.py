@@ -1,4 +1,5 @@
 import logging
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional, Dict
@@ -36,12 +37,12 @@ def test_real_model_initialization(ollama_client):
     """Проверка инициализации с реальной моделью"""
     models = ollama.list().get('models', [])
     model_names = [m['model'] for m in models]  # Проверяем структуру ответа
-    assert ollama_client.model in model_names, "Модель не найдена в списке доступных"
+    assert ollama_client.current_model in model_names, "Модель не найдена в списке доступных"
 
 
 def test_real_model_parameters(ollama_client):
     """Проверка параметров модели"""
-    model_info = ollama.show(ollama_client.model)
+    model_info = ollama.show(ollama_client.current_model)
 
     log_model_info(model_info)
 
@@ -690,6 +691,17 @@ def clear_logs():
         except Exception as e:
             logging.warning(f"Не удалось очистить лог-файл {log_file}: {e}")
 
+def clear_cache():
+    """Удаляет папку .cache и все её содержимое."""
+    cache_dir = os.path.join(os.getcwd(), '.cache')
+    try:
+        shutil.rmtree(cache_dir)
+        logging.info("Папка кэша успешно удалена.")
+    except FileNotFoundError:
+        logging.warning("Папка кэша не найдена, возможно она уже была удалена.")
+    except Exception as e:
+        logging.error(f"Произошла ошибка при попытке удалить папку кэша: {str(e)}")
+
 def calculate_code_metrics(code: str) -> dict:
     """Рассчитывает метрики для кода"""
     lines = code.strip().split('\n')
@@ -772,6 +784,8 @@ def test_stability(ollama_client, caplog):
     # Очищаем логи перед запуском
     clear_logs()
 
+    clear_cache()
+
     # Настраиваем логирование в файл
     log_file = "stability_test.log"
 
@@ -825,9 +839,13 @@ def test_stability(ollama_client, caplog):
 
         # Логируем информацию о модели
         logging.info("Используется модель Ollama:")
-        logging.info(f"- Название: {ollama_client.model}")
+        logging.info(f"- Название: {ollama_client.current_model}")
         logging.info(f"- Размер модели: {ollama_client.size_gb:.2f} GB")
         logging.info(f"- Размер контекста: {ollama_client.context_length} токенов")
+        logging.info(f"- Количество слоев: {ollama_client.block_count}")
+        logging.info(f"- Размерность эмбеддингов: {ollama_client.embedding_length}")
+        logging.info(f"- Количество голов внимания в каждом слое: {ollama_client.head_count}")
+        logging.info(f"- Количество голов для ключей/значений: {ollama_client.head_count_kv}")
         logger.info("=" * 50)
 
         logger.info(f"\nНачало проверки стабильности тестов ({iterations} итераций)")

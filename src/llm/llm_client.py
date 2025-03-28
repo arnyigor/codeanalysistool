@@ -71,42 +71,53 @@ class OllamaClient:
                 raise RuntimeError("Нет запущенных моделей Ollama")
 
             # Проверяем наличие обязательных полей
-            model_info = available_models[0]
+            selected_params_count = '7b'
+            ollama_model = self.select_model(available_models, selected_params_count)
 
-            if 'model' not in model_info:
+            model_name = ollama_model['model']
+            if 'model' not in ollama_model:
                 raise ValueError("Некорректный формат данных модели: отсутствует поле 'name'")
 
-            self.model = model_info['model']
+            self.current_model = ollama_model['model']
             # Получаем детальную информацию о модели
-            model_details = ollama.show(self.model)
+            model_response = ollama.show(self.current_model)
 
             # Форматируем размер модели
-            size_bytes = int(model_info.get('size', 0))
+            size_bytes = int(ollama_model.get('size', 0))
             self.size_gb = size_bytes / (1024 * 1024 * 1024)
 
-            # Получаем размер контекста
-            model_params = model_details.get('model_info', {})
-            self.context_length = None
+            model_info = model_response.get('modelinfo', {})
 
-            # Ищем любой ключ, содержащий context_length
-            for key in model_params.keys():
-                if 'context_length' in key:
-                    self.context_length = model_params[key]
-                    break
+            if not model_info and 'model_info' in model_response:
+                model_info = model_response['model_info']
 
-            if self.context_length is None:
-                self.context_length = 8192  # Безопасное значение по умолчанию
+            self.context_length = self.get_value_by_key(model_info, 'context_length')
+
+            if self.context_length is None or str(self.context_length).lower() == 'нет данных':
+                self.context_length = 8192
                 logging.warning(
                     "Не удалось определить размер контекста модели, используем значение по умолчанию")
 
+            self.block_count = self.get_value_by_key(model_info, 'block_count')
+
+            self.embedding_length = self.get_value_by_key(model_info, 'embedding_length')
+
+            self.head_count = self.get_value_by_key(model_info, 'head_count')
+
+            self.head_count_kv = self.get_value_by_key(model_info, 'head_count_kv')
+
             # Логируем основную информацию о модели
             logging.info("Используется модель Ollama:")
-            logging.info(f"- Название: {self.model}")
+            logging.info(f"- Название: {self.current_model}")
             logging.info(f"- Размер модели: {self.size_gb:.2f} GB")
-            logging.info(f"- Размер контекста: {self.context_length} токенов")
+            logging.info(f"- Размер контекста модели: {self.context_length} токенов")
+            logging.info(f"- Количество слоев: {self.block_count}")
+            logging.info(f"- Размерность эмбеддингов: {self.embedding_length}")
+            logging.info(f"- Количество голов внимания в каждом слое: {self.head_count}")
+            logging.info(f"- Количество голов для ключей/значений: {self.head_count_kv}")
 
             # Сохраняем структуру
-            self.model_details = model_details
+            self.model_details = model_response
 
         except KeyError as e:
             logging.error("Отсутствует обязательное поле в данных модели: {}".format(str(e)),
@@ -118,6 +129,27 @@ class OllamaClient:
                 "1. Сервис Ollama запущен\n"
                 "2. Хотя бы одна модель активна"
             )
+
+    def select_model(self, models, params_count):
+        """Выбирает модель по количеству параметров."""
+        for model in models:
+            if 'model' in model:
+                # Проверяем наличие параметров в имени модели (например, :7b или :3b)
+                if f":{params_count.lower()}" in model['model'].lower():
+                    return model
+        raise ValueError(f"Модель с параметрами {params_count} не найдена. Доступные модели: " + ", ".join(
+            [model['model'] for model in models]))
+
+
+    def get_value_by_key(self, model_info, key):
+        if isinstance(model_info, dict):
+            for info_key in model_info.keys():
+                if key in info_key:
+                    return model_info[info_key]
+            logging.error(f"Ключ '{key}' не найден в model_info", exc_info=True)
+        else:
+            logging.error("model_info должен быть словарем", exc_info=True)
+        return "Нет данных"
 
     def _estimate_doc_size(self, code: str) -> int:
         """Оценивает размер необходимой документации."""
@@ -165,8 +197,8 @@ class OllamaClient:
         # Общий размер входных данных
         total_input_tokens = code_tokens + template_tokens + system_tokens
         
-        # Определяем базовый размер контекста (минимум 2048)
-        base_context = max(2048, total_input_tokens * 2)  # x2 для места под ответ
+        # Определяем базовый размер контекста (минимум 4096)
+        base_context = max(4096, total_input_tokens * 2)  # x2 для места под ответ
         
         # Добавляем буфер, который растет с размером входных данных
         buffer_size = min(1000, total_input_tokens // 4)  # Адаптивный буфер
@@ -184,10 +216,16 @@ class OllamaClient:
 
         # Устанавливаем параметры
         params = {
-            "temperature": 0.2,
-            "top_p": 0.7,
-            "num_tokens": doc_tokens + 200,  # Базовый размер + буфер
-            "context_length": OPTIMAL_CONTEXT
+            "temperature": 0.3,
+            "top_p": 0.8,
+            "num_predict": doc_tokens + 200,  # Базовый размер + буфер
+            "context_length": OPTIMAL_CONTEXT,
+            "num_gpu": 0,  # Явно указываем использование CPU
+            "num_thread": 12,  # Используем все доступные потоки
+            "repeat_last_n": 64,  # Уменьшаем для экономии памяти
+            "repeat_penalty": 1.1,  # Немного увеличиваем для лучшей производительности
+            "num_ctx": OPTIMAL_CONTEXT,  # Явно задаем размер контекста
+            "stop": ["```", "---", "###"]  # Стоп-токены для предотвращения генерации лишнего
         }
 
         # Логируем параметры
@@ -206,22 +244,29 @@ class OllamaClient:
         logging.info(f"- Тип файла: {file_type}")
         logging.info(f"- Температура: {params['temperature']}")
         logging.info(f"- Top-p: {params['top_p']}")
-        logging.info(f"- Предсказание токенов: {params['num_tokens']}")
+        logging.info(f"- Предсказание токенов: {params['num_predict']}")
 
         return params
 
-    def _log_model_response(self, response: Dict, elapsed_time: float, metrics: Dict):
+    def _log_model_response(self, response: Dict, metrics: Dict):
         """Логирует информацию о работе модели после запроса."""
         logging.info("\nИнформация о выполнении запроса:")
         
-        # Логируем метрики
-        logging.info(f"- Общее время: {elapsed_time:.2f} сек")
+        # Логируем метрики времени
+        logging.info(f"- Общее время: {metrics['total_duration']/1e9:.2f} сек")
+        logging.info(f"- Время загрузки модели: {metrics['load_duration']/1e9:.2f} сек")
+        logging.info(f"- Время обработки промпта: {metrics['prompt_eval_duration']/1e9:.2f} сек")
+        logging.info(f"- Время генерации: {metrics['generation_time']/1e9:.2f} сек")
+
+        # Логируем метрики токенов
         logging.info(f"- Токены промпта: {metrics['prompt_tokens']}")
         logging.info(f"- Токены ответа: {metrics['completion_tokens']}")
-        logging.info(f"- Всего токенов: {metrics['tokens']}")
-        logging.info(f"- Скорость: {metrics['speed']:.2f} токенов/сек")
-        logging.info(f"- Среднее время на токен: {(elapsed_time * 1000) / metrics['tokens']:.2f} мс")
-        
+        logging.info(f"- Всего токенов: {metrics['total_tokens']}")
+
+        # Логируем метрики производительности
+        logging.info(f"- Скорость генерации: {metrics['generation_speed']:.2f} токенов/сек")
+        logging.info(f"- Среднее время на токен: {metrics['time_per_token']:.2f} мс")
+
         # Информация о памяти
         if 'memory' in response:
             memory = response['memory']
@@ -232,11 +277,13 @@ class OllamaClient:
                         value_mb = value / (1024 * 1024)  # Конвертируем в МБ
                         logging.info(f"- {key}: {value_mb:.2f} МБ")
 
-    def analyze_code(self, code: str, file_type: str, context: Optional[Dict[str, str]] = None) -> Optional[dict]:
+    def analyze_code(self, code: str, file_type: str, context: Optional[Dict[str, str]] = None) -> \
+            Optional[dict]:
         """Анализирует код и генерирует документацию."""
         # Проверяем тип файла
         if file_type != 'kotlin':
-            raise ValueError(f"Неподдерживаемый тип файла: {file_type}. Поддерживается только Kotlin.")
+            raise ValueError(
+                f"Неподдерживаемый тип файла: {file_type}. Поддерживается только Kotlin.")
 
         # Проверяем наличие кода
         if not code or not code.strip():
@@ -263,6 +310,7 @@ class OllamaClient:
 
             # Добавляем основной системный промпт
             system_prompt += """Вы - опытный разработчик, создающий документацию ИСКЛЮЧИТЕЛЬНО на РУССКОМ языке в формате KDoc.  
+            ВНИМАНИЕ: ВАЖНО! Документация ДОЛЖНА быть на РУССКОМ языке!  
 Ваша задача - добавить **полную и строгую документацию** к классу, используя только следующие аннотации:  
 `@property`, `@constructor`, `@param`, `@return`, `@see`
 
@@ -280,46 +328,59 @@ class OllamaClient:
 6. Описывайте особенности реализации из контекста"""
 
             # Создаем промпт с кодом и контекстом
-            prompt = self._create_documentation_prompt(code, file_type, context)
+            prompt = self._create_documentation_prompt(code, file_type)
 
             # Получаем адаптивные параметры запроса
             model_params = self._get_model_params(code, len(prompt.encode()), file_type, context)
 
             logging.info("\nОтправляем запрос к модели...")
-            start_time = time.time()
 
             # Отправляем запрос к модели с системным промптом
             response = ollama.generate(
-                model=self.model,
+                model=self.current_model,
                 prompt=prompt,
                 system=system_prompt,
                 options=model_params
             )
-            elapsed_time = time.time() - start_time
 
             # Получаем метрики из ответа
-            context = response.get('context', [])
-            prompt_eval_count = len(context) if isinstance(context, list) else 0
-            eval_count = response.get('eval_count', 0)
+            prompt_eval_count = response.get('prompt_eval_count', 0)  # Токены промпта
+            eval_count = response.get('eval_count', 0)  # Токены ответа
+            eval_duration = response.get('eval_duration', 0)  # Время генерации
+            prompt_eval_duration = response.get('prompt_eval_duration', 0)  # Время обработки промпта
+            total_duration = response.get('total_duration', 0)  # Общее время
+            load_duration = response.get('load_duration', 0)  # Время загрузки модели
             
             # Вычисляем токены
-            completion_tokens = eval_count - prompt_eval_count if eval_count > prompt_eval_count else 0
-            total_tokens = prompt_eval_count + completion_tokens
+            prompt_tokens = prompt_eval_count  # Токены промпта
+            completion_tokens = eval_count     # Токены ответа
+            total_tokens = prompt_tokens + completion_tokens  # Общее количество токенов
             
-            # Скорость обработки
-            tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
+            # Вычисляем время генерации (в наносекундах)
+            generation_time = eval_duration
+
+            # Вычисляем скорость генерации (токенов в секунду)
+            # eval_duration в наносекундах, поэтому умножаем на 1e9
+            generation_speed = (eval_count / eval_duration * 1e9) if eval_duration > 0 else 0
+
+            # Вычисляем среднее время на токен (в миллисекундах)
+            time_per_token = (eval_duration / eval_count / 1e6) if eval_count > 0 else 0
 
             # Формируем метрики
             metrics = {
-                "time": round(elapsed_time, 2),
-                "tokens": total_tokens,
-                "prompt_tokens": prompt_eval_count,
+                "total_tokens": total_tokens,
+                "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
-                "speed": round(tokens_per_second, 2)
+                "total_duration": total_duration,
+                "load_duration": load_duration,
+                "prompt_eval_duration": prompt_eval_duration,
+                "generation_time": generation_time,
+                "generation_speed": round(generation_speed, 2),
+                "time_per_token": round(time_per_token, 2)
             }
 
             # Логируем информацию о работе модели
-            self._log_model_response(response, elapsed_time, metrics)
+            self._log_model_response(response, metrics)
 
             # Получаем документацию из ответа
             documentation = response.get('response', '').strip()
@@ -346,10 +407,11 @@ class OllamaClient:
             logging.error(error_msg, exc_info=True)
             return self._create_error_response(error_msg)
 
-    def _create_documentation_prompt(self, code: str, file_type: str, context: Optional[Dict[str, str]] = None) -> str:
+    def _create_documentation_prompt(self, code: str, file_type: str) -> str:
         """Создает промпт для генерации документации."""
         if file_type != 'kotlin':
-            raise ValueError(f"Неподдерживаемый тип файла: {file_type}. Поддерживается только Kotlin.")
+            raise ValueError(
+                f"Неподдерживаемый тип файла: {file_type}. Поддерживается только Kotlin.")
 
         prompt_template = f"""[ПРАВИЛА ДОКУМЕНТИРОВАНИЯ KDOC]
 #### ПРАВИЛА ДОКУМЕНТИРОВАНИЯ:
