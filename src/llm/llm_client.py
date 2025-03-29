@@ -1,7 +1,7 @@
-import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import time
 from typing import Dict, Optional
@@ -9,6 +9,7 @@ from typing import Dict, Optional
 import ollama
 
 LOG_FILE = os.path.abspath("ollama_client.log")
+
 
 def setup_logging():
     """Настройка логгера для тестов"""
@@ -34,10 +35,10 @@ def setup_logging():
         """Форматтер с цветным выводом для разных уровней логирования"""
         COLORS = {
             'DEBUG': '\033[37m',  # Серый
-            'INFO': '\033[32m',   # Зеленый
-            'WARNING': '\033[33m', # Желтый
-            'ERROR': '\033[31m',   # Красный
-            'CRITICAL': '\033[41m' # Красный фон
+            'INFO': '\033[32m',  # Зеленый
+            'WARNING': '\033[33m',  # Желтый
+            'ERROR': '\033[31m',  # Красный
+            'CRITICAL': '\033[41m'  # Красный фон
         }
         RESET = '\033[0m'
 
@@ -134,8 +135,9 @@ class OllamaClient:
                 # Проверяем наличие параметров в имени модели (например, :7b или :3b)
                 if f":{params_count.lower()}" in model['model'].lower():
                     return model
-        raise ValueError(f"Модель с параметрами {params_count} не найдена. Доступные модели: " + ", ".join(
-            [model['model'] for model in models]))
+        raise ValueError(
+            f"Модель с параметрами {params_count} не найдена. Доступные модели: " + ", ".join(
+                [model['model'] for model in models]))
 
     def get_value_by_key(self, model_info, key):
         if isinstance(model_info, dict):
@@ -158,50 +160,52 @@ class OllamaClient:
         # Минимум 200 токенов, максимум 3000
         return max(200, min(estimated_tokens, 3000))
 
-    def _get_model_params(self, code: str, prompt_size: int, file_type: str, context: Optional[Dict[str, str]] = None) -> dict:
+    def _get_model_params(self, code: str, prompt_size: int, file_type: str,
+                          context: Optional[Dict[str, str]] = None) -> dict:
         """Формирует параметры запроса к модели."""
         # Базовый системный промпт
         BASE_SYSTEM_PROMPT_SIZE = 500  # ~500 токенов для базового системного промпта
-        
+
         # Оцениваем размеры в токенах (примерно 3 байта на токен)
         code_tokens = len(code.encode()) // 3
         template_tokens = prompt_size // 3
-        
+
         # Оцениваем размер системного промпта с контекстом
         system_tokens = BASE_SYSTEM_PROMPT_SIZE
         context_size = 0
-        
+
         # Обработка контекста
         if context:
             valid_context = {
-                title: content.strip() 
-                for title, content in context.items() 
+                title: content.strip()
+                for title, content in context.items()
                 if content is not None and content.strip()
             }
             if valid_context:
                 # Добавляем токены на заголовки и форматирование
-                context_size = sum(len(str(content).encode()) // 3 for content in valid_context.values())
+                context_size = sum(
+                    len(str(content).encode()) // 3 for content in valid_context.values())
                 context_size += len(valid_context) * 20  # ~20 токенов на заголовки и форматирование
                 system_tokens += context_size
-                
+
                 # Логируем информацию о контексте
                 logging.info("\nКонтекст:")
                 for title, content in valid_context.items():
                     preview = content[:50] + "..." if len(content) > 50 else content
                     logging.info(f"- {title}:\n{preview}")
-        
+
         # Общий размер входных данных
         total_input_tokens = code_tokens + template_tokens + system_tokens
-        
+
         # Определяем базовый размер контекста (минимум 4096)
         base_context = max(4096, total_input_tokens * 2)  # x2 для места под ответ
-        
+
         # Добавляем буфер, который растет с размером входных данных
         buffer_size = min(1000, total_input_tokens // 4)  # Адаптивный буфер
-        
+
         # Определяем максимальный безопасный размер контекста (80% от максимума модели)
         max_safe_context = int(self.context_length * 0.8)
-        
+
         # Вычисляем оптимальный размер контекста
         OPTIMAL_CONTEXT = min(base_context + buffer_size, max_safe_context)
 
@@ -210,15 +214,15 @@ class OllamaClient:
         if context_size > 0:
             doc_tokens = int(doc_tokens * 1.5)  # Увеличиваем размер для контекстной документации
 
-        # Устанавливаем параметры
-        params = {
-            "temperature": 0.3,
-            "top_p": 0.8,
-            "num_predict": doc_tokens + 200,
-            "num_gpu": 0,
-            "num_thread": 8,
-            "num_ctx": OPTIMAL_CONTEXT,
-        }
+        # # Устанавливаем параметры
+        # params = {
+        #     "temperature": 0.3,
+        #     "top_p": 0.8,
+        #     "num_predict": doc_tokens + 200,
+        #     "num_ctx": OPTIMAL_CONTEXT,
+        # }
+
+        params = self.get_params(OPTIMAL_CONTEXT, doc_tokens)
 
         # Логируем параметры
         logging.info("\nПараметры запроса к модели:")
@@ -240,15 +244,50 @@ class OllamaClient:
 
         return params
 
+    def get_params(self, optimal_context, doc_tokens) -> Dict:
+        # Определяем операционную систему
+        os_type = platform.system()
+        is_windows = os_type == "Windows"
+        # Устанавливаем параметры в зависимости от операционной системы
+        if is_windows:
+            params = {
+                "temperature": 0.3,
+                "top_p": 0.8,
+                "num_predict": doc_tokens + 200,
+                "num_ctx": optimal_context,
+            }
+        else:
+            # Устанавливаем параметры оптимальные для мак
+            params = {
+                # Параметры генерации (оставляем оптимальными для документирования)
+                "temperature": 0.3,
+                "top_p": 0.8,
+                "top_k": 30,  # Добавляем для ускорения
+                "num_predict": doc_tokens + 200,
+
+                # Параметры производительности (оптимизируем для 6-ядерного i7)
+                "num_thread": 10,  # Используем гиперпоточность (6 физических ядер → 12 логических)
+                "num_batch": 8,  # Увеличиваем размер пакета для лучшей утилизации CPU
+
+                # Параметры контекста и памяти
+                "num_ctx": optimal_context,
+                "use_mmap": True,  # Улучшает загрузку модели
+                "use_mlock": True,  # Предотвращает выгрузку модели в своп (32GB RAM достаточно)
+            }
+        # Выводим информацию о системе и параметрах в лог
+        logging.info(f"Операционная система: {os_type}")
+        logging.info(f"Используемые параметры: {params}")
+        return params
+
     def _log_model_response(self, response: Dict, metrics: Dict):
         """Логирует информацию о работе модели после запроса."""
         logging.info("\nИнформация о выполнении запроса:")
-        
+
         # Логируем метрики времени
-        logging.info(f"- Общее время: {metrics['total_duration']/1e9:.2f} сек")
-        logging.info(f"- Время загрузки модели: {metrics['load_duration']/1e9:.2f} сек")
-        logging.info(f"- Время обработки промпта: {metrics['prompt_eval_duration']/1e9:.2f} сек")
-        logging.info(f"- Время генерации: {metrics['generation_time']/1e9:.2f} сек")
+        logging.info(f"- Общее время: {metrics['total_duration'] / 1e9:.2f} сек")
+        logging.info(f"- Время загрузки модели: {metrics['load_duration'] / 1e9:.2f} сек")
+        logging.info(f"- Время обработки промпта: {metrics['prompt_eval_duration'] / 1e9:.2f} сек")
+        logging.info(f"- Время генерации: {metrics['generation_time'] / 1e9:.2f} сек")
 
         # Логируем метрики токенов
         logging.info(f"- Токены промпта: {metrics['prompt_tokens']}")
@@ -291,8 +330,8 @@ class OllamaClient:
             # Добавляем контекстную информацию если она есть
             if context:
                 valid_context = {
-                    title: content.strip() 
-                    for title, content in context.items() 
+                    title: content.strip()
+                    for title, content in context.items()
                     if content is not None and content.strip()
                 }
                 if valid_context:
@@ -339,15 +378,16 @@ class OllamaClient:
             prompt_eval_count = response.get('prompt_eval_count', 0)  # Токены промпта
             eval_count = response.get('eval_count', 0)  # Токены ответа
             eval_duration = response.get('eval_duration', 0)  # Время генерации
-            prompt_eval_duration = response.get('prompt_eval_duration', 0)  # Время обработки промпта
+            prompt_eval_duration = response.get('prompt_eval_duration',
+                                                0)  # Время обработки промпта
             total_duration = response.get('total_duration', 0)  # Общее время
             load_duration = response.get('load_duration', 0)  # Время загрузки модели
-            
+
             # Вычисляем токены
             prompt_tokens = prompt_eval_count  # Токены промпта
-            completion_tokens = eval_count     # Токены ответа
+            completion_tokens = eval_count  # Токены ответа
             total_tokens = prompt_tokens + completion_tokens  # Общее количество токенов
-            
+
             # Вычисляем время генерации (в наносекундах)
             generation_time = eval_duration
 
@@ -377,7 +417,7 @@ class OllamaClient:
             # Получаем документацию из ответа
             documentation = response.get('response', '').strip()
 
-                # Проверяем наличие документации
+            # Проверяем наличие документации
             if not documentation or not "/**" in documentation:
                 documentation = self._create_empty_java_doc(code)
                 logging.warning("Модель вернула некорректный ответ, создана базовая документация")
@@ -388,7 +428,7 @@ class OllamaClient:
             # Формируем результат
             result = {
                 "documentation": documentation,
-                    "status": "success",
+                "status": "success",
                 "metrics": metrics
             }
 
@@ -520,7 +560,7 @@ class OllamaClient:
         """Сохраняет результат теста в файл."""
         try:
             # Создаем директорию для результатов тестов
-            test_results_dir = os.path.join(os.getcwd(), '.cache','test_results')
+            test_results_dir = os.path.join(os.getcwd(), '.cache', 'test_results')
             os.makedirs(test_results_dir, exist_ok=True)
 
             # Генерируем уникальное имя файла
