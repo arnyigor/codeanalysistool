@@ -267,7 +267,13 @@ class CodeAnalyzer:
                 return None
             
             # Получаем контекст, если указаны контекстные файлы
-            context = self._get_context(context_files) if context_files else None
+            context = None
+            if context_files:
+                context = self._get_context(context_files)
+                if context:
+                    logging.info(f"Подготовлен контекст из {len(context)} файлов для анализа {file_path}")
+                else:
+                    logging.warning(f"Контекстные файлы указаны, но не удалось прочитать ни один из них для {file_path}")
             
             # Анализируем код
             result = self.client.analyze_code(code, file_type, context)
@@ -339,21 +345,35 @@ class CodeAnalyzer:
             context_files: Список путей к контекстным файлам
         
         Returns:
-            Словарь контекста, где ключи - имена файлов, а значения - их содержимое
+            Словарь контекста, где ключи - пути к файлам, а значения - их содержимое
         """
         context = {}
+        successful_files = 0
+        failed_files = 0
+        
+        logging.info(f"Начинаю загрузку {len(context_files)} контекстных файлов")
         
         for file_path in context_files:
             try:
                 path_obj = Path(file_path)
+                abs_path = os.path.abspath(file_path)
+                
                 if path_obj.exists() and path_obj.is_file():
                     with open(file_path, 'r', encoding='utf-8') as f:
-                        context[path_obj.name] = f.read()
+                        file_content = f.read()
+                        # Используем полный путь в качестве ключа вместо только имени файла
+                        context[abs_path] = file_content
+                        successful_files += 1
+                        file_size = len(file_content)
+                        logging.info(f"Успешно загружен контекстный файл: {abs_path} (размер: {file_size} байт)")
                 else:
-                    logging.warning(f"Контекстный файл не найден: {file_path}")
+                    failed_files += 1
+                    logging.warning(f"Контекстный файл не найден или не является файлом: {abs_path}")
             except Exception as e:
+                failed_files += 1
                 logging.error(f"Ошибка при чтении контекстного файла {file_path}: {str(e)}")
         
+        logging.info(f"Загрузка контекста завершена: успешно загружено {successful_files} файлов, не удалось загрузить {failed_files} файлов")
         return context
     
     def _validate_documentation(self, documentation: str) -> str:

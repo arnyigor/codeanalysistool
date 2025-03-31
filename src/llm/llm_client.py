@@ -71,8 +71,8 @@ class OllamaClient:
             if not available_models:
                 raise RuntimeError("Нет запущенных моделей Ollama")
 
-            selected_params_count = '3b'
-            ollama_model = self.select_model(available_models, selected_params_count)
+            selected_model_name = 'qwen2.5-coder:3b'
+            ollama_model = self.select_model(available_models, selected_model_name)
             if 'model' not in ollama_model:
                 raise ValueError("Некорректный формат данных модели: отсутствует поле 'name'")
 
@@ -128,16 +128,15 @@ class OllamaClient:
                 "2. Хотя бы одна модель активна"
             )
 
-    def select_model(self, models, params_count):
-        """Выбирает модель по количеству параметров."""
-        for model in models:
-            if 'model' in model:
-                # Проверяем наличие параметров в имени модели (например, :7b или :3b)
-                if f":{params_count.lower()}" in model['model'].lower():
-                    return model
-        raise ValueError(
-            f"Модель с параметрами {params_count} не найдена. Доступные модели: " + ", ".join(
+    def select_model(self, models, selected_model_name):
+        """Выбирает модель по имени модели."""
+        logging.info(f"Доступные модели: " + ", ".join(
                 [model['model'] for model in models]))
+        for model in models:
+            if 'model' in model and model['model'].lower() == selected_model_name.lower():
+                return model
+        raise ValueError(
+            f"Модель с именем {selected_model_name} не найдена. Проверьте список моделей.")
 
     def get_value_by_key(self, model_info, key):
         if isinstance(model_info, dict):
@@ -176,23 +175,15 @@ class OllamaClient:
 
         # Обработка контекста
         if context:
-            valid_context = {
-                title: content.strip()
-                for title, content in context.items()
-                if content is not None and content.strip()
-            }
-            if valid_context:
-                # Добавляем токены на заголовки и форматирование
-                context_size = sum(
-                    len(str(content).encode()) // 3 for content in valid_context.values())
-                context_size += len(valid_context) * 20  # ~20 токенов на заголовки и форматирование
-                system_tokens += context_size
+            # Используем только для оценки размера, не формируем системный промпт здесь
+            # Добавляем токены на заголовки и форматирование
+            context_size = sum(
+                len(str(content).encode()) // 3 for content in context.values())
+            context_size += len(context) * 20  # ~20 токенов на заголовки и форматирование
+            system_tokens += context_size
 
-                # Логируем информацию о контексте
-                logging.info("\nКонтекст:")
-                for title, content in valid_context.items():
-                    preview = content[:50] + "..." if len(content) > 50 else content
-                    logging.info(f"- {title}:\n{preview}")
+            # Логируем только статистику, не содержимое
+            logging.info(f"\nКонтекст для оценки размера: {len(context)} файлов, ~{context_size} токенов")
 
         # Общий размер входных данных
         total_input_tokens = code_tokens + template_tokens + system_tokens
@@ -214,14 +205,7 @@ class OllamaClient:
         if context_size > 0:
             doc_tokens = int(doc_tokens * 1.5)  # Увеличиваем размер для контекстной документации
 
-        # # Устанавливаем параметры
-        # params = {
-        #     "temperature": 0.3,
-        #     "top_p": 0.8,
-        #     "num_predict": doc_tokens + 200,
-        #     "num_ctx": OPTIMAL_CONTEXT,
-        # }
-
+        # Устанавливаем параметры
         params = self.get_params(OPTIMAL_CONTEXT, doc_tokens)
 
         # Логируем параметры
@@ -327,24 +311,24 @@ class OllamaClient:
             # Формируем системный промпт
             system_prompt = ""
 
-            # Добавляем контекстную информацию если она есть
+            # 1. Добавляем контекстную информацию, если она есть
             if context:
-                valid_context = {
-                    title: content.strip()
-                    for title, content in context.items()
-                    if content is not None and content.strip()
-                }
-                if valid_context:
-                    system_prompt += "=== Контекстная информация ===\n"
-                    for title, content in valid_context.items():
-                        system_prompt += f"\n--- {title} ---\n{content}\n\n"
+                logging.info(f"Добавляем контекст в системный промпт: {len(context)} файлов")
 
-            # Добавляем основной системный промпт
+                # Добавляем контекст в системный промпт
+                if context:
+                    system_prompt += "\n=== Контекстная информация ===\n"
+                    for path, content in context.items():
+                        system_prompt += f"{content.strip()}\n"
+            
+            # 2. Добавляем основной системный промпт
             system_prompt += """Вы - опытный разработчик, создающий документацию ИСКЛЮЧИТЕЛЬНО на РУССКОМ языке в формате KDoc.  
             ВНИМАНИЕ: ВАЖНО! Документация ДОЛЖНА быть на РУССКОМ языке!  
 Ваша задача - добавить **полную и строгую документацию** к классу, используя только следующие аннотации:  
 `@property`, `@constructor`, `@param`, `@return`, `@see`
-
+"""
+            # 3. Добавляем важные требования
+            system_prompt +="""
 Важные требования:
 1. Вернуть ТОЛЬКО документацию класса, БЕЗ КОДА
 2. НЕ создавать отдельную документацию для методов
@@ -365,6 +349,7 @@ class OllamaClient:
             model_params = self._get_model_params(code, len(prompt.encode()), file_type, context)
 
             logging.info("\nОтправляем запрос к модели...")
+            logging.info(f"Весь системный промпт: {system_prompt}")
 
             # Отправляем запрос к модели с системным промптом
             response = ollama.generate(
