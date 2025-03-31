@@ -473,7 +473,9 @@ class CodeAnalyzer:
                 
                 # Оборачиваем в KDoc
                 cleaned_doc = documentation.strip()
-                documentation = f"/**\n * {cleaned_doc.replace('\n', '\n * ')}\n */"
+                # 1. Выполняем замену и сохраняем результат в переменную
+                formatted_doc_body = cleaned_doc.replace('\n', '\n * ')
+                documentation = f"/**\n * {formatted_doc_body}\n */"
                 logging.info(f"Документация обернута в KDoc формат, новый размер: {len(documentation)}")
         
         # Проверяем, что документация заканчивается закрывающим комментарием
@@ -529,7 +531,10 @@ class CodeAnalyzer:
                 if cleaned_text:
                     # Если есть полезный текст после удаления кавычек, оборачиваем его в KDoc
                     logging.info(f"Пытаемся восстановить документацию из текста: '{cleaned_text[:100]}...'")
-                    return f"/**\n * {cleaned_text.replace('\n', '\n * ')}\n */"
+                    # 1. Выполняем замену и сохраняем результат в переменную
+                    formatted_body = cleaned_text.replace('\n', '\n * ')
+                    # 2. Используем переменную в f-строке при возврате
+                    return f"/**\n * {formatted_body}\n */"
                 else:
                     return "/** Ошибка: не найден KDoc комментарий */"
         
