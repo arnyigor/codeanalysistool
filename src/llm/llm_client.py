@@ -8,57 +8,6 @@ from typing import Dict, Optional
 
 import ollama
 
-LOG_FILE = os.path.abspath("ollama_client.log")
-
-
-def setup_logging():
-    """Настройка логгера для тестов"""
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
-
-    # Форматтер для файла
-    file_formatter = logging.Formatter(
-        '%(asctime)s | %(levelname)-8s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-
-    # Очистка файла перед запуском
-    with open(LOG_FILE, 'w', encoding='utf-8') as f:
-        f.write("")
-
-    file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
-    file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
-
-    # Цветной форматтер для консоли
-    class ColoredFormatter(logging.Formatter):
-        """Форматтер с цветным выводом для разных уровней логирования"""
-        COLORS = {
-            'DEBUG': '\033[37m',  # Серый
-            'INFO': '\033[32m',  # Зеленый
-            'WARNING': '\033[33m',  # Желтый
-            'ERROR': '\033[31m',  # Красный
-            'CRITICAL': '\033[41m'  # Красный фон
-        }
-        RESET = '\033[0m'
-
-        def format(self, record):
-            color = self.COLORS.get(record.levelname, self.RESET)
-            record.levelname_colored = f"{color}{record.levelname:<8}{self.RESET}"
-            return super().format(record)
-
-    console_handler = logging.StreamHandler()
-    console_formatter = ColoredFormatter(
-        '%(levelname_colored)s | %(message)s'
-    )
-    console_handler.setFormatter(console_formatter)
-    logger.addHandler(console_handler)
-
-
-# Настройка логгирования перед тестами
-setup_logging()
-
-
 class OllamaClient:
     def __init__(self):
         """
@@ -71,7 +20,7 @@ class OllamaClient:
             if not available_models:
                 raise RuntimeError("Нет запущенных моделей Ollama")
 
-            selected_model_name = 'qwen2.5-coder:3b'
+            selected_model_name = 'qwen2.5-coder:7b'
             ollama_model = self.select_model(available_models, selected_model_name)
             if 'model' not in ollama_model:
                 raise ValueError("Некорректный формат данных модели: отсутствует поле 'name'")
@@ -349,13 +298,13 @@ class OllamaClient:
             model_params = self._get_model_params(code, len(prompt.encode()), file_type, context)
 
             logging.info("\nОтправляем запрос к модели...")
-            logging.info(f"Весь системный промпт: {system_prompt}")
+            logging.info(f"Весь системный промпт имеет размер: {len(system_prompt)}")
 
             # Отправляем запрос к модели с системным промптом
             response = ollama.generate(
-                model=self.current_model,
+            model=self.current_model,
                 prompt=prompt,
-                system=system_prompt,
+            system=system_prompt,
                 options=model_params
             )
 
@@ -402,18 +351,15 @@ class OllamaClient:
             # Получаем документацию из ответа
             documentation = response.get('response', '').strip()
 
-            # Проверяем наличие документации
+                # Проверяем наличие документации
             if not documentation or not "/**" in documentation:
                 documentation = self._create_empty_java_doc(code)
                 logging.warning("Модель вернула некорректный ответ, создана базовая документация")
 
-            # Сохраняем результат для тестов
-            self._save_test_result(documentation, file_type)
-
             # Формируем результат
             result = {
                 "documentation": documentation,
-                "status": "success",
+                    "status": "success",
                 "metrics": metrics
             }
 
